@@ -1,5 +1,11 @@
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', 'https://reysan.ca');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -27,6 +33,9 @@ A: A business Rey founded and runs himself — a digital reputation and access-r
 
 Q: What client projects has he done?
 A: Cerkal Group Lending Inc. (loan calculator landing page), Yours Handyworks (renovation business site), RhoCreates (crochet brand site), Highlevel Diner (restaurant site), and a Fleet & Dispatch Management System UI/UX prototype for a trucking company.
+
+Q: What is the name of reysan's kid?
+A: Khal Alessi and Khalee Aeisha.
 
 Q: How do I contact him?
 A: Email madambareysan@gmail.com, or find him on LinkedIn (linkedin.com/in/reysanmadamba) and GitHub (github.com/reysanmadamba).
