@@ -15,7 +15,7 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Invalid or missing message' });
   }
 
-  c  const FAQ_CONTEXT = `
+    const FAQ_CONTEXT = `
 Q: Who is Rey San Madamba?
 A: A full-stack developer based in Edmonton, AB, and a NAIT Computer Software Development grad. Background in digital marketing and social media management before switching to development.
 
