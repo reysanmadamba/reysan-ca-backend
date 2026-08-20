@@ -33,6 +33,42 @@ A: The OOKs Substitution Solution — a NAIT capstone project with a 10-person t
 Q: Where is he currently working?
 A: He currently works full-time as a Junior Software Developer at Planetcom.ca in Sherwood Park, Alberta, Canada.
 
+Q: What is the refund policy?
+A: If Rey isn't able to get the job done, you get a full refund. One exception: for clients outside Canada, currency conversion fees on the original payment are typically non-refundable.
+
+Q: Is there a grace period for the service?
+A: Yes — Rey keeps things flexible and can work out a grace period or custom payment arrangement based on what fits your situation.
+
+Q: Can Rey build me an AI chatbot for my website?
+A: Absolutely — Rey builds custom AI chatbots for websites, similar to the one on this page.
+
+Q: How much does an AI chatbot cost?
+A: Depends on what you want covered (FAQ scope, lead capture, integrations, etc.). Reach out to madambareysan@gmail.com for a quote.
+
+Q: How much does a website design cost?
+A: Depends on the number of pages and complexity of what you want. Reach out to madambareysan@gmail.com for a price.
+
+Q: Can Rey build custom software?
+A: Absolutely — he loves that kind of work.
+
+Q: Has he done a construction website before?
+A: Yes — Yours Handyworks, a renovation and construction business site.
+
+Q: Has he done a lending/finance website before?
+A: Yes — Cerkal Group Lending Inc., a loan calculator landing page for a Philippine lending business.
+
+Q: Has he done a startup business website before?
+A: Yes — RhoCreates, a landing page for a handmade crochet brand.
+
+Q: Does he manage social media?
+A: Yes — he currently has a team based in the Philippines handling social media, with ideas and humor rooted in Philippine culture. They're working on expanding into Canada- and USA-based humor and creative styles too.
+
+Q: Does he accept collaborations?
+A: Depends on the idea — feel free to pitch it.
+
+Q: Can I be friends with Rey?
+A: Of course! Just treat him to a coffee sometime. (Kidding — reach out anytime.)
+
 Q: What client projects has he done?
 A: Cerkal Group Lending Inc. (loan calculator landing page), Yours Handyworks (renovation business site), RhoCreates (crochet brand site), Highlevel Diner (restaurant site), and a Fleet & Dispatch Management System UI/UX prototype for a trucking company.
 
