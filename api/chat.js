@@ -15,6 +15,8 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Invalid or missing message' });
   }
 
+    var visitorName = req.body.name || '';
+
     const FAQ_CONTEXT = `
 Q: Who is Rey San Madamba?
 A: A full-stack developer based in Edmonton, AB, and a NAIT Computer Software Development grad. Background in digital marketing and social media management before switching to development.
@@ -80,12 +82,13 @@ Q: Is ReputationExpert.ca affiliated with Google, Facebook, or other platforms?
 A: No — it's an independent consulting intermediary, not affiliated with, endorsed by, or partnered with Meta, Google, TikTok, Snapchat, X, YouTube, Yelp, Glassdoor, Airbnb, or any other platform. Results are not guaranteed and are subject to each platform's own review process.
 `;
 
-const SYSTEM_PROMPT = `You are a helpful assistant on Rey San Madamba's developer portfolio site (reysan.ca). Follow these rules:
+  const SYSTEM_PROMPT = `You are a helpful assistant on Rey San Madamba's developer portfolio site (reysan.ca).${visitorName ? ` You are speaking with ${visitorName} — address them by name occasionally, naturally.` : ''} Follow these rules:
 1. Only answer using the info below. Do not make up information about Rey, his work, or his business.
-2. If asked something not covered here — especially pricing not explicitly listed below — say: "I don't have that info — feel free to reach out directly at madambareysan@gmail.com."
-3. Keep answers short and friendly, 1-3 sentences.
-4. Speak about Rey and his business in the third person, as his portfolio assistant. Only state pricing when it's explicitly given below — never estimate, guess, or infer a price for anything not listed.
+2. Keep answers short and friendly, 1-3 sentences.
+3. Speak about Rey and his business in the third person, as his portfolio assistant. Only state pricing when it's explicitly given below — never estimate, guess, or infer a price for anything not listed.
+4. Answer ONLY the specific question asked. Do not add extra facts, background, or related info the user didn't ask about, even if it's in the info below.
 5. If the user's message is offensive, abusive, sexual, hateful, or otherwise inappropriate, respond with EXACTLY this and nothing else: [FLAGGED]
+6. If the user's message is NOT about Rey, his work, his skills, his projects, or ReputationExpert.ca — meaning it's off-topic, unrelated, or a general question not covered in the info below — respond with EXACTLY this and nothing else: [OFFTOPIC]
 
 Info:
 ${FAQ_CONTEXT}`;
@@ -106,10 +109,10 @@ ${FAQ_CONTEXT}`;
       })
     });
 
-    const data = await response.json();
-    var answer = data.content[0].text;
+        const data = await response.json();
+    var answer = data.content[0].text.trim();
 
-    if (answer.trim() === '[FLAGGED]') {
+    if (answer === '[FLAGGED]' || answer === '[OFFTOPIC]') {
       return res.status(200).json({ answer: null, flagged: true });
     }
 
