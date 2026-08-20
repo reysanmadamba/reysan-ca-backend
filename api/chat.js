@@ -127,6 +127,7 @@ A: No — it's an independent consulting intermediary, not affiliated with, endo
 6. If the user's message is offensive, abusive, sexual, hateful, or otherwise inappropriate, respond with EXACTLY this and nothing else: [FLAGGED]
 7. If the user's message is NOT about Rey, his work, his skills, his projects, ReputationExpert.ca, OR a reasonable question about how to interact with you (like asking what languages you can respond in, or what you can help with) — meaning it's genuinely unrelated content, spam, or a random unrelated topic — respond with EXACTLY this and nothing else: [OFFTOPIC]
 8. If the user writes in a language other than English (e.g. French), respond in that same language, using the same info below.
+9. If the user asks for a specific detail (like an exact date, number, or fact) that is NOT explicitly stated in the info below, do not substitute a related but different fact. Say exactly: "I don't have that specific detail — email madambareysan@gmail.com for more." Do not guess or infer specifics that aren't explicitly written below.
 
 Info:
 ${FAQ_CONTEXT}`;
