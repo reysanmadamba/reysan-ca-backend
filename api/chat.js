@@ -162,14 +162,19 @@ ${FAQ_CONTEXT}`;
     var answer = data.content[0].text.trim();
     var isFlagged = (answer === '[FLAGGED]' || answer === '[OFFTOPIC]');
 
-    supabase.from('chat_logs').insert({
-      session_id: sessionId,
-      visitor_name: visitorName,
-      visitor_email: visitorEmail,
-      question: req.body.message,
-      answer: answer,
-      flagged: isFlagged
-    }).then(function () { }).catch(function () { });
+    try {
+      const { error } = await supabase.from('chat_logs').insert({
+        session_id: sessionId,
+        visitor_name: visitorName,
+        visitor_email: visitorEmail,
+        question: req.body.message,
+        answer: answer,
+        flagged: isFlagged
+      });
+      if (error) console.error('Supabase insert error:', error);
+    } catch (err) {
+      console.error('Supabase insert failed:', err);
+    }
 
     if (isFlagged) {
       return res.status(200).json({ answer: null, flagged: true });
