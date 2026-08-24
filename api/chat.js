@@ -1,3 +1,10 @@
+import { createClient } from '@supabase/supabase-js';
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', 'https://reysan.ca');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -15,9 +22,11 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Invalid or missing message' });
   }
 
-    var visitorName = req.body.name || '';
+  var visitorName = req.body.name || '';
+  var visitorEmail = req.body.email || '';
+  var sessionId = req.body.sessionId || '';
 
-    const FAQ_CONTEXT = `
+  const FAQ_CONTEXT = `
 Q: Who is Rey San Madamba?
 A: A full-stack developer based in Edmonton, AB, and a NAIT Computer Software Development grad. Background in digital marketing and social media management before switching to development.
 
@@ -149,10 +158,20 @@ ${FAQ_CONTEXT}`;
       })
     });
 
-        const data = await response.json();
+    const data = await response.json();
     var answer = data.content[0].text.trim();
+    var isFlagged = (answer === '[FLAGGED]' || answer === '[OFFTOPIC]');
 
-    if (answer === '[FLAGGED]' || answer === '[OFFTOPIC]') {
+    supabase.from('chat_logs').insert({
+      session_id: sessionId,
+      visitor_name: visitorName,
+      visitor_email: visitorEmail,
+      question: req.body.message,
+      answer: answer,
+      flagged: isFlagged
+    }).then(function () { }).catch(function () { });
+
+    if (isFlagged) {
       return res.status(200).json({ answer: null, flagged: true });
     }
 
