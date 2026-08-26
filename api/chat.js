@@ -323,7 +323,8 @@ ${FAQ_CONTEXT}`;
     }
 
     res.status(200).json({ answer: answer });
-  } catch (err) {
-    res.status(500).json({ error: 'Something went wrong' });
+   } catch (err) {
+    console.error('Chat handler error:', err);
+    res.status(500).json({ error: 'Something went wrong', debug: err.message });
   }
 }
