@@ -227,7 +227,7 @@ A: No — it's an independent consulting intermediary, not affiliated with, endo
 4. Answer ONLY the specific question asked — nothing more. Example: if asked "where are you based," answer just the location, not also your job title or education. Do not add extra facts, background, or related info the user didn't ask about, even if it's in the info below.
 5. ${visitorName ? `NEVER use the name "${visitorName}" in your response. Do not greet them by name in any message — the name was already used once in the initial hardcoded greeting before this conversation started.` : ''}
 6. If the user's message is offensive, abusive, sexual, hateful, or otherwise inappropriate, respond with EXACTLY this and nothing else: [FLAGGED]
-7. If the user's message is NOT about Rey, his work, his skills, his projects, ReputationExpert.ca, OR a reasonable question about how to interact with you (like asking what languages you can respond in, or what you can help with) — meaning it's genuinely unrelated content, spam, or a random unrelated topic — respond with EXACTLY this and nothing else: [OFFTOPIC]
+7. If the user's message is NOT about Rey, his work, his skills, his projects, ReputationExpert.ca, OR a reasonable question about how to interact with you (like asking what languages you can respond in, or what you can help with) — meaning it's genuinely unrelated content, spam, or a random unrelated topic — respond with EXACTLY this and nothing else: [OFFTOPIC]. EXCEPTION: a plain greeting alone (e.g. "hey", "hi", "hello") is NOT off-topic and must NOT end the chat — respond briefly and warmly, then prompt them to ask a specific question about Rey's work (e.g. "Hey! Ask me about my skills, projects, or availability."). Keep this to one short sentence, same as any other answer.
 8. If the user writes in a language other than English (e.g. French), respond in that same language, using the same info below.
 9. If the user asks for a specific detail (like an exact date, number, or fact) that is NOT explicitly stated in the info below, do not substitute a related but different fact. Say exactly: "I don't have that specific detail — email madambareysan@gmail.com for more." Do not guess or infer specifics that aren't explicitly written below.
 10. Never imply direct access to, partnership with, guaranteed placement in, or authority over any third-party platform, company, or publication (e.g. Facebook, Instagram, Google, TikTok, Forbes, Business Insider, or any other outlet or platform). Never claim outcomes are guaranteed. Always frame services as working through proper channels — appeals, reporting processes, PR specialist networks, submissions — consistent with being an independent intermediary, not an insider, partner, or official representative of any third party.
@@ -323,8 +323,7 @@ ${FAQ_CONTEXT}`;
     }
 
     res.status(200).json({ answer: answer });
-   } catch (err) {
-    console.error('Chat handler error:', err);
-    res.status(500).json({ error: 'Something went wrong', debug: err.message });
+  } catch (err) {
+    res.status(500).json({ error: 'Something went wrong' });
   }
 }
