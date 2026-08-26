@@ -5,8 +5,13 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
+const allowedOrigins = ['https://reysan.ca', 'https://test.local'];
+
 export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', 'https://reysan.ca');
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
