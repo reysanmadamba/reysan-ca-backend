@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import crypto from 'crypto';
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -6,6 +7,33 @@ const supabase = createClient(
 );
 
 const allowedOrigins = ['https://reysan.ca', 'https://test.local'];
+
+// ============================================================
+// TUNABLE THRESHOLDS
+// ============================================================
+const MAX_PER_SESSION = 20;
+const MAX_PER_IP_PER_HOUR = 40;
+const FLAG_BAN_THRESHOLD = 10;
+const BAN_DURATION_DAYS = 3;
+const SESSION_TOKEN_TTL_HOURS = 6;
+
+function sign(payload) {
+  const hmac = crypto.createHmac('sha256', process.env.CAPTCHA_SECRET).update(payload).digest('hex');
+  return Buffer.from(payload).toString('base64') + '.' + hmac;
+}
+function verify(token) {
+  if (!token || typeof token !== 'string' || !token.includes('.')) return null;
+  const [b64, hmac] = token.split('.');
+  let payload;
+  try {
+    payload = Buffer.from(b64, 'base64').toString('utf8');
+  } catch {
+    return null;
+  }
+  const expected = crypto.createHmac('sha256', process.env.CAPTCHA_SECRET).update(payload).digest('hex');
+  if (expected !== hmac) return null;
+  return payload;
+}
 
 export default async function handler(req, res) {
   const origin = req.headers.origin;
@@ -23,13 +51,72 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
+  var clientIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+
+ 
+
+  // BAN CHECK
+  const { data: banRow } = await supabase
+    .from('banned_ips')
+    .select('banned_until')
+    .eq('ip', clientIp)
+    .maybeSingle();
+
+  if (banRow && new Date(banRow.banned_until) > new Date()) {
+    return res.status(403).json({ error: 'This IP is temporarily blocked. Try again later.' });
+  }
+
+
+  // CAPTCHA GATE
+
+  var sessionToken = req.body && req.body.sessionToken;
+  var payload = verify(sessionToken);
+
+  if (!payload) {
+    return res.status(401).json({ error: 'Captcha required', needsCaptcha: true });
+  }
+
+  var parts = payload.split(':');
+  var tokenSessionId = parts[0];
+  var expiresAtMs = Number(parts[1]);
+
+  if (Date.now() > expiresAtMs) {
+    return res.status(401).json({ error: 'Captcha expired', needsCaptcha: true });
+  }
+
   if (!req.body || !req.body.message || req.body.message.length > 500) {
     return res.status(400).json({ error: 'Invalid or missing message' });
   }
 
   var visitorName = req.body.name || '';
   var visitorEmail = req.body.email || '';
-  var sessionId = req.body.sessionId || '';
+  var sessionId = req.body.sessionId || tokenSessionId || '';
+
+  if (sessionId !== tokenSessionId) {
+    return res.status(401).json({ error: 'Session mismatch', needsCaptcha: true });
+  }
+
+  
+  // STEP 3 — RATE LIMITING
+  const { count: sessionCount, error: sessionErr } = await supabase
+    .from('chat_logs')
+    .select('*', { count: 'exact', head: true })
+    .eq('session_id', sessionId);
+
+  if (!sessionErr && sessionCount >= MAX_PER_SESSION) {
+    return res.status(429).json({ error: 'Message limit reached for this conversation.' });
+  }
+
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const { count: ipCount, error: ipErr } = await supabase
+    .from('chat_logs')
+    .select('*', { count: 'exact', head: true })
+    .eq('ip', clientIp)
+    .gte('created_at', oneHourAgo);
+
+  if (!ipErr && ipCount >= MAX_PER_IP_PER_HOUR) {
+    return res.status(429).json({ error: 'Too many messages from this network. Try again later.' });
+  }
 
   const FAQ_CONTEXT = `
 Q: Who is Rey San Madamba?
@@ -174,11 +261,31 @@ ${FAQ_CONTEXT}`;
         visitor_email: visitorEmail,
         question: req.body.message,
         answer: answer,
-        flagged: isFlagged
+        flagged: isFlagged,
+        ip: clientIp
       });
       if (error) console.error('Supabase insert error:', error);
     } catch (err) {
       console.error('Supabase insert failed:', err);
+    }
+
+  
+    // STEP 4 — AUTO-BAN AFTER REPEATED FLAGS
+    if (isFlagged) {
+      const { count: flagCount } = await supabase
+        .from('chat_logs')
+        .select('*', { count: 'exact', head: true })
+        .eq('ip', clientIp)
+        .eq('flagged', true);
+
+      if (flagCount >= FLAG_BAN_THRESHOLD) {
+        const bannedUntil = new Date(Date.now() + BAN_DURATION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+        await supabase.from('banned_ips').upsert({
+          ip: clientIp,
+          banned_until: bannedUntil,
+          reason: `${flagCount} flagged messages`
+        });
+      }
     }
 
     if (isFlagged) {
