@@ -251,7 +251,7 @@ ${FAQ_CONTEXT}`;
         },
         body: JSON.stringify({
           model: 'gpt-5.6-luna',
-          max_tokens: 150,
+          max_completion_tokens: 150,
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
             { role: 'user', content: req.body.message }
