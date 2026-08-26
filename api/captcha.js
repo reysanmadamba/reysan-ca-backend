@@ -46,7 +46,7 @@ export default async function handler(req, res) {
 
   // ============================================================
   // MODE 1 — no answer submitted yet: generate a new challenge
-  // ============================================================
+  
   if (!hasAnswer) {
     var a = Math.floor(Math.random() * 8) + 1; // 1-8
     var b = Math.floor(Math.random() * 8) + 1; // 1-8
