@@ -9,6 +9,12 @@ const supabase = createClient(
 const allowedOrigins = ['https://reysan.ca', 'https://test.local'];
 
 // ============================================================
+// AI PROVIDER TOGGLE — switch between Claude and OpenAI here.
+// Set to 'claude' or 'openai'. Nothing else needs to change.
+// ============================================================
+const AI_PROVIDER = 'openai';
+
+// ============================================================
 // TUNABLE THRESHOLDS
 // ============================================================
 const MAX_PER_SESSION = 20;
@@ -53,8 +59,6 @@ export default async function handler(req, res) {
 
   var clientIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
 
- 
-
   // BAN CHECK
   const { data: banRow } = await supabase
     .from('banned_ips')
@@ -66,9 +70,7 @@ export default async function handler(req, res) {
     return res.status(403).json({ error: 'This IP is temporarily blocked. Try again later.' });
   }
 
-
   // CAPTCHA GATE
-
   var sessionToken = req.body && req.body.sessionToken;
   var payload = verify(sessionToken);
 
@@ -96,8 +98,7 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'Session mismatch', needsCaptcha: true });
   }
 
-  
-  // STEP 3 — RATE LIMITING
+  // RATE LIMITING
   const { count: sessionCount, error: sessionErr } = await supabase
     .from('chat_logs')
     .select('*', { count: 'exact', head: true })
@@ -235,23 +236,53 @@ Info:
 ${FAQ_CONTEXT}`;
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5',
-        max_tokens: 150,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: req.body.message }]
-      })
-    });
+    var answer;
 
-    const data = await response.json();
-    var answer = data.content[0].text.trim();
+    if (AI_PROVIDER === 'openai') {
+      // ============================================================
+      // OPENAI — GPT-5.6 Luna (OpenAI's fast/cheap tier, roughly the
+      // role Haiku plays on the Claude side)
+      // ============================================================
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-5.6-luna',
+          max_tokens: 150,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: req.body.message }
+          ]
+        })
+      });
+      const data = await response.json();
+      answer = data.choices[0].message.content.trim();
+
+    } else {
+      // ============================================================
+      // CLAUDE — claude-haiku-4-5
+      // ============================================================
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5',
+          max_tokens: 150,
+          system: SYSTEM_PROMPT,
+          messages: [{ role: 'user', content: req.body.message }]
+        })
+      });
+      const data = await response.json();
+      answer = data.content[0].text.trim();
+    }
+
     var isFlagged = (answer === '[FLAGGED]' || answer === '[OFFTOPIC]');
 
     try {
@@ -269,8 +300,7 @@ ${FAQ_CONTEXT}`;
       console.error('Supabase insert failed:', err);
     }
 
-  
-    // STEP 4 — AUTO-BAN AFTER REPEATED FLAGS
+    // AUTO-BAN AFTER REPEATED FLAGS
     if (isFlagged) {
       const { count: flagCount } = await supabase
         .from('chat_logs')
