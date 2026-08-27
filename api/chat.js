@@ -13,6 +13,7 @@ const allowedOrigins = ['https://reysan.ca', 'https://test.local'];
 // Set to 'claude' or 'openai'. Nothing else needs to change.
 // ============================================================
 const AI_PROVIDER = 'openai';
+// replace openai to claude if you want to use claude api 
 
 // ============================================================
 // TUNABLE THRESHOLDS
@@ -119,7 +120,7 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: 'Too many messages from this network. Try again later.' });
   }
 
-  const FAQ_CONTEXT = `
+const FAQ_CONTEXT = `
 Q: Who is Rey San Madamba?
 A: A full-stack developer based in Edmonton, AB, and a NAIT Computer Software Development grad. Background in digital marketing and social media management before switching to development.
 
@@ -148,7 +149,7 @@ Q: How much does an AI chatbot cost?
 A: Depends on what you want covered (FAQ scope, lead capture, integrations, etc.). Reach out to madambareysan@gmail.com for a quote.
 
 Q: How much does a website design cost?
-A: Depends on the number of pages and complexity of what you want. Reach out to madambareysan@gmail.com for a price.
+A: A simple 1-3 page landing site starts at $500 CAD — includes a custom email setup (like you@yourdomain.ca) and hosting. Sites with heavier imagery, animation, or custom features are priced separately — reach out to madambareysan@gmail.com for a quote. Ask Rey about a promo discount too, he runs them from time to time.
 
 Q: Can Rey build custom software?
 A: Absolutely — he loves that kind of work.
@@ -218,6 +219,36 @@ A: A business owner was targeted by a fake Facebook account posting false, defam
 
 Q: Is ReputationExpert.ca affiliated with Google, Facebook, or other platforms?
 A: No — it's an independent consulting intermediary, not affiliated with, endorsed by, or partnered with Meta, Google, TikTok, Snapchat, X, YouTube, Yelp, Glassdoor, Airbnb, or any other platform. Results are not guaranteed and are subject to each platform's own review process.
+
+Q: What AI model are you using for this chat?
+A: Mostly a fast, low-cost model since it's cheap per token. For more complex questions needing extra reasoning, a different model steps in instead — chosen case by case.
+
+Q: Can I get an AI chatbot like this one for my website?
+A: Yes — email madambareysan@gmail.com for a custom quote based on your needs. Rey can also help set up and feed your chatbot the right business info.
+
+Q: Does the website price include a domain name?
+A: No — domain registration is separate and billed at cost, but Rey can help you register one.
+
+Q: How long does a basic website take to build?
+A: Typically 1-2 weeks for a simple landing page, longer for more complex builds — timeline is confirmed after the scope is set.
+
+Q: Do you offer ongoing website maintenance or updates?
+A: Yes — email madambareysan@gmail.com to discuss a maintenance arrangement.
+
+Q: Do you require a deposit before starting?
+A: Yes — a deposit is typically required upfront, with the balance due on completion. Details are confirmed per project.
+
+Q: Can you migrate my existing website to a new one?
+A: Yes — Rey can rebuild or migrate an existing site to a new design or platform.
+
+Q: Do you build online stores / e-commerce sites?
+A: Yes — e-commerce functionality can be added depending on your needs. Email madambareysan@gmail.com for a quote.
+
+Q: Do you sign contracts or NDAs?
+A: Yes — Rey is open to signing a contract or NDA if the project calls for it.
+
+Q: What payment methods do you accept?
+A: E-transfer is the most common — other methods can be discussed if needed.
 `;
 
   const SYSTEM_PROMPT = `You are an AI assistant speaking AS Rey San Madamba, on his portfolio site (reysan.ca). You represent Rey in the first person ("I", "my") but you are an AI, not Rey himself — the visitor has already been told this before starting the chat.${visitorName ? ` You are speaking with ${visitorName}.` : ''} Follow these rules:
