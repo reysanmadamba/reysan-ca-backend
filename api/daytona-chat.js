@@ -11,6 +11,8 @@ const supabase = createClient(
 const allowedOrigins = ['https://reysan.ca', 'https://test.local'];
 
 const MAX_MESSAGES_PER_SESSION = 20; // change this number to raise/lower the per-session cap
+const OFFTOPIC_LOCK_THRESHOLD = 3; // consecutive/total off-topic strikes before the chat auto-locks
+const OFFTOPIC_MARKER = '[OFFTOPIC_FLAG]';
 
 // ============================================================
 // AI PROVIDER TOGGLE — switch between Claude and OpenAI here.
@@ -107,6 +109,8 @@ FACTS YOU KNOW (do not go beyond these; if asked something not covered, say some
 - Calgary-area communities include Southbow Landing, Rangeview, Walden, Harmony, and Heartland (North/Southeast Calgary, Cochrane, and Springbank Area).
 - Winnipeg communities include Aurora, Highland Pointe, Summerlea, Devonshire Park, and Prairie Pointe.
 - Warranty (Greater Edmonton): handled by Tacada Customer Care (Daytona Homes is a Tacada company) — 1-877-788-7689, Customercare@tacada.ca, Mon-Thurs 8am-5pm, Fri 8am-4pm. Warranty contacts for Calgary and Winnipeg are not loaded in this demo — if asked, say you don't have that detail and point them to daytonahomes.ca/warranty.
+
+DEMO CUSTOMER SERVICE CONTACT — if a visitor wants to speak to a real person, has a question this demo can't answer, or you're using the fallback line above, offer this in addition: this demo's support contact is example@daytonaDemoAI.ca, monitored weekdays 8am-5pm. If it's currently outside those hours, say so honestly (something like "it's outside our demo support hours right now, so a reply might take a bit, but you're welcome to email anyway") — don't pretend someone will respond instantly outside business hours, but don't discourage them from trying either. For real Daytona warranty or sales questions specifically, still give the real regional phone number/email from FACTS above as the primary contact — example@daytonaDemoAI.ca is only for questions about this AI demo itself, not a substitute for Daytona's actual customer service.
 - There are currently 143 move-in-ready listings in Edmonton, 63 in Calgary, and 30 in Winnipeg (this demo only has a sample of 40 total for illustration — 20 Edmonton, 10 Calgary, 10 Winnipeg).
 
 CURRENT LISTINGS (JSON — use ONLY these for specific home recommendations, and filter by the "city" field to match what the visitor said). The nearSchool/nearGrocery/nearPark flags are placeholder demo data, not verified proximity — if asked, say proximity search is a preview/demo feature and the flag is illustrative, not a guarantee. Note priceNote: Edmonton and Calgary prices are GST-included; Winnipeg prices are pre-GST (home & lot) — mention this if a visitor asks about final price:
@@ -124,8 +128,11 @@ Rules:
 - When a visitor describes what they want (city, budget, bed/bath count, community, size, move-in timing, near a school/grocery/park), recommend 1-3 matching homes from the LISTINGS data above (filtered to their city), citing address, community, price, beds/baths, sqft, and possession date plainly.
 - If nothing in the sample matches well, say so honestly and mention the full listing inventory is on daytonahomes.ca for that region.
 - Never invent listings, prices, square footage, or features not in the data above. If a visitor asks about anything not covered in FACTS or LISTINGS — a specific policy, a detail about a listing not included here, anything you're unsure of — use the fallback line above rather than guessing or filling in a plausible-sounding answer.
+- Do NOT use markdown formatting of any kind — no **bold**, no _italics_, no bullet points with - or *, no headers with #. This chat widget renders plain text only, so markdown symbols show up as literal asterisks/hashes and look broken. Write everything in plain sentences.
 - Never invent warranty terms, legal terms, or financing details beyond what's given here — offer the phone number instead.
-- Stay on topic: Daytona Homes, their process, communities, and these listings. Redirect politely for anything unrelated.
+- Stay strictly on topic: Daytona Homes, its building process, communities, listings, warranty, and this AI demo itself. If a visitor asks about anything unrelated (general chit-chat, other companies, unrelated topics), politely say you can only help with Daytona Homes-related questions. Check the conversation so far: if this is their first off-topic message, add a gentle warning that the chat may end if they keep asking unrelated things. If they've already gone off-topic once or more before in this conversation, be firmer and repeat the warning more directly. If this is their third or more off-topic message in this conversation, tell them plainly that you're ending the chat now, and point them to example@daytonaDemoAI.ca if they want to reach the demo team.
+- Whenever a message is off-topic (every time, not just the third strike), end your reply with exactly this on its own final line and nothing else after it, so the system can track it: [OFFTOPIC_FLAG]
+  Never explain or mention this marker to the visitor — it's a silent signal only, always on its own last line.
 - Keep responses concise — 2-4 sentences, plus a short listing rundown when recommending homes.`;
 
 function corsHeaders(req, res) {
@@ -248,28 +255,53 @@ export default async function handler(req, res) {
       reply = textBlock ? textBlock.text.trim() : "Sorry, I couldn't generate a response just now.";
     }
 
+    // Detect the off-topic marker the model appends, strip it before it ever
+    // reaches the visitor, and remember whether this turn was off-topic.
+    let isOffTopic = false;
+    if (reply.includes(OFFTOPIC_MARKER)) {
+      isOffTopic = true;
+      reply = reply.replace(OFFTOPIC_MARKER, '').trim();
+    }
+
     // Log this turn to the same chat_logs table the main site uses,
     // tagged so /report can tell it apart from portfolio chat.
+    let disconnected = false;
     try {
       const clientIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
       const lastUserMessage = [...cleanMessages].reverse().find(m => m.role === 'user');
+      const sid = extractSessionId(sessionToken);
 
       const { error: logError } = await supabase.from('chat_logs').insert({
-        session_id: extractSessionId(sessionToken),
+        session_id: sid,
         visitor_name: '',
         visitor_email: '',
         question: lastUserMessage ? lastUserMessage.content : '',
         answer: reply,
-        flagged: false,
+        flagged: isOffTopic,
         ip: clientIp,
         source: 'daytona'
       });
       if (logError) console.error('Supabase insert error:', logError);
+
+      // Auto-disconnect after repeated off-topic messages in this session
+      if (isOffTopic && sid) {
+        const { count: offTopicCount, error: countError } = await supabase
+          .from('chat_logs')
+          .select('*', { count: 'exact', head: true })
+          .eq('session_id', sid)
+          .eq('source', 'daytona')
+          .eq('flagged', true);
+
+        if (countError) console.error('Supabase count error:', countError);
+        if (!countError && offTopicCount >= OFFTOPIC_LOCK_THRESHOLD) {
+          disconnected = true;
+        }
+      }
     } catch (logErr) {
       console.error('Supabase insert failed:', logErr);
     }
 
-    return res.status(200).json({ reply, limitReached: userTurns === MAX_MESSAGES_PER_SESSION });
+    return res.status(200).json({ reply, limitReached: userTurns === MAX_MESSAGES_PER_SESSION, disconnected });
   } catch (err) {
     console.error('Chat handler error:', err);
     return res.status(500).json({ error: 'Internal server error' });
