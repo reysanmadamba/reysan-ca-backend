@@ -22,72 +22,85 @@ const AI_PROVIDER = 'openai';
 // replace openai to claude if you want to use claude api
 
 // ============================================================
-// Demo listings — Edmonton (20), Calgary (10), Winnipeg (10).
-// Edmonton: first 10 are real current listings (street addresses, as
-// shown on daytonahomes.ca/greater-edmonton/move-in-ready); the next
-// 10 are placeholder entries (fictional address, real community names).
-// Calgary & Winnipeg: all 10 each are real current listings pulled from
-// daytonahomes.ca/greater-calgary/move-in-ready and
-// winnipeg.daytonahomes.ca/quick-possessions. Calgary/Winnipeg listings
-// are identified by model name, not street address — that's how Daytona
-// displays them on those regional sites (Edmonton's site shows street
-// addresses instead). Winnipeg prices are pre-GST (home & lot); Edmonton
-// and Calgary prices shown are GST-included, per each region's listing
-// display — flagged with priceNote below.
+// LISTINGS — pulled live from daytonahomes.ca on Sept 5, 2026.
+// All entries below are REAL, currently posted move-in-ready homes
+// (replacing the earlier fictional placeholder set).
 //
-// nearSchool / nearGrocery / nearPark are PLACEHOLDER flags, not real
-// geo data — just here so the bot can demo "near a school" / "near
-// groceries" style queries. Swap this whole block for a real
-// nearby_places lookup (vector search / Google Places) later.
+// IMPORTANT: real listings change constantly (sale pending, sold,
+// new ones posted, prices adjusted). This snapshot WILL go stale —
+// re-pull periodically, or build a real sync step into the pgvector
+// migration instead of manually copy-pasting like this each time.
+//
+// `url` = direct link to that home's page on daytonahomes.ca. Offer
+// this alongside the shadow-check link so the AI can give both:
+// "see the full listing" AND "see the sun/shadow view."
+//
+// `lat` / `lng` = geocoded via Nominatim (OpenStreetMap), free tier,
+// no API key. `geocodePrecision` shows how exact the match is:
+//   - "address"   -> matched the real street address, lot-accurate
+//   - "street"    -> matched the street, not the exact house number
+//   - "community" -> matched the neighborhood only (many Calgary/
+//                    Winnipeg entries land here — Calgary listings
+//                    are identified by model name with no street
+//                    address at all, and several Winnipeg streets
+//                    aren't in OSM yet since they're newer builds)
+//   - "city"      -> matched only the city center (least precise —
+//                    happens when even the community name didn't
+//                    resolve)
+// Multiple listings in the same community will share identical
+// lat/lng at "community" or "city" precision — that's expected,
+// not a bug. Shadow-check still works, it just centers on the
+// neighborhood rather than the exact lot for those entries.
+//
+// When this gets rebuilt with Google Geocoding API + pgvector post-
+// demo, re-run all of these — address-level accuracy should improve
+// significantly, especially for Winnipeg.
+//
+// nearSchool / nearGrocery / nearPark remain PLACEHOLDER flags —
+// not real geo data, same caveat as the original dataset.
 // ============================================================
 const LISTINGS = [
-  // ---------- EDMONTON (real) ----------
-  { city: 'Edmonton', address: '227 157 Avenue NE', community: 'Quarry Vista', beds: 3, baths: 2.5, sqft: 1783, price: 489916, priceNote: 'GST included', possession: 'October 2026', features: ['Side Entry', 'Prep Kitchen'], nearSchool: true, nearGrocery: false, nearPark: true },
-  { city: 'Edmonton', address: '9105 Elves Loop NW', community: 'Edgemont', beds: 3, baths: 2.5, sqft: 1707, price: 514498, priceNote: 'GST included', possession: 'Immediate', features: ['Main Floor Bed & Bath', 'Side Entry', "9' Foundation"], nearSchool: true, nearGrocery: true, nearPark: false },
-  { city: 'Edmonton', address: '265 Chappelle Drive SW', community: 'Chappelle Gardens', beds: 3, baths: 2.5, sqft: 1638, price: 509514, priceNote: 'GST included', possession: 'Immediate', features: ['Side Entry'], nearSchool: false, nearGrocery: true, nearPark: true },
-  { city: 'Edmonton', address: '8822 Edgemont Link NW', community: 'Edgemont', beds: 3, baths: 2.5, sqft: 1537, price: 485098, priceNote: 'GST included', possession: 'September 2026', features: ['Side Entry'], nearSchool: true, nearGrocery: false, nearPark: false },
-  { city: 'Edmonton', address: '5141 Cawsey Bend SW', community: 'Chappelle Gardens', beds: 4, baths: 3, sqft: 1956, price: 642085, priceNote: 'GST included', possession: 'Immediate', features: ['Main Floor Bed & Bath', 'Side Entry'], nearSchool: false, nearGrocery: true, nearPark: false },
-  { city: 'Edmonton', address: '22432 86 Avenue NW', community: 'Rosemont', beds: 3, baths: 2.5, sqft: 1815, price: 584629, priceNote: 'GST included', possession: 'December 2026', features: ['Side Entry'], nearSchool: true, nearGrocery: true, nearPark: true },
-  { city: 'Edmonton', address: '15715 3 Street NE', community: 'Quarry Vista', beds: 3, baths: 2.5, sqft: 2283, price: 679625, priceNote: 'GST included', possession: 'December 2026', features: ['Side Entry', 'Prep Kitchen', 'Vaulted Ceiling'], nearSchool: false, nearGrocery: false, nearPark: true },
-  { city: 'Edmonton', address: '7099 Rosenthal Drive NW', community: 'Rosemont', beds: 2, baths: 2.5, sqft: 1022, price: 389900, priceNote: 'GST included', possession: 'September 2026', features: ['Side Entry'], nearSchool: true, nearGrocery: false, nearPark: false },
-  { city: 'Edmonton', address: '137 Mustang Close', community: 'Ardrossan', beds: 3, baths: 2.5, sqft: 1783, price: 512135, priceNote: 'GST included', possession: 'Coming 2027', features: ['Side Entry'], nearSchool: false, nearGrocery: true, nearPark: false },
-  { city: 'Edmonton', address: '8628 224 Street NW', community: 'Rosemont', beds: 3, baths: 2.5, sqft: 1815, price: 583804, priceNote: 'GST included', possession: 'September 2026', features: ['Side Entry'], nearSchool: true, nearGrocery: true, nearPark: false },
+  // ---------- EDMONTON (real, live) ----------
+  { city: 'Edmonton', address: '8798 Edgemont Link NW', community: 'Edgemont', beds: 3, baths: 2.5, sqft: 1537, price: null, priceNote: 'Sale Pending', possession: 'Immediate', features: ['Side Entry'], nearSchool: true, nearGrocery: false, nearPark: false, url: 'https://www.daytonahomes.ca/greater-edmonton/homes/egnl-016-015', lat: 53.4693948, lng: -113.6793346, geocodePrecision: 'address' },
+  { city: 'Edmonton', address: '8686 Edgemont Link NW', community: 'Edgemont', beds: 3, baths: 2.5, sqft: 1707, price: 513506, priceNote: 'GST included', possession: 'Immediate', features: ['Built Green Certified Gold'], nearSchool: true, nearGrocery: false, nearPark: false, url: 'https://www.daytonahomes.ca/greater-edmonton/homes/dedgnl-010-086', lat: 53.4693948, lng: -113.6793346, geocodePrecision: 'address' },
+  { city: 'Edmonton', address: '5032 Cawsey Link SW', community: 'Chappelle Gardens', beds: 3, baths: 2.5, sqft: 1956, price: 636350, priceNote: 'GST included', possession: 'October 2026', features: ['Main Floor Bed & Bath', 'Side Entry'], nearSchool: false, nearGrocery: true, nearPark: true, url: 'https://www.daytonahomes.ca/greater-edmonton/homes/chp-044-016', lat: 53.4025164, lng: -113.5911037, geocodePrecision: 'address' },
+  { city: 'Edmonton', address: '7113 Rosenthal Drive NW', community: 'Rosemont', beds: 2, baths: 2.5, sqft: 1022, price: 359900, priceNote: 'GST included', possession: 'November 2026', features: [], nearSchool: true, nearGrocery: false, nearPark: false, url: 'https://www.daytonahomes.ca/greater-edmonton/homes/rmth-011-022', lat: 53.5615152, lng: -113.4714311, geocodePrecision: 'community' },
+  { city: 'Edmonton', address: '5452 Hawthorn Run SW', community: 'The Orchards at Ellerslie', beds: 3, baths: 2.5, sqft: 1707, price: 497999, priceNote: 'GST included', possession: 'Immediate', features: ['Side Entry', 'Built Green Certified Gold'], nearSchool: false, nearGrocery: true, nearPark: true, url: 'https://www.daytonahomes.ca/greater-edmonton/homes/orc-042-034', lat: 53.4021295, lng: -113.4614895, geocodePrecision: 'address' },
+  { city: 'Edmonton', address: '3248 Orchards Wynd SW', community: 'The Orchards at Ellerslie', beds: 3, baths: 2.5, sqft: 1400, price: 489300, priceNote: 'GST included', possession: 'November 2026', features: ['Side Entry'], nearSchool: false, nearGrocery: true, nearPark: true, url: 'https://www.daytonahomes.ca/greater-edmonton/homes/orc-004-024', lat: 53.3999092, lng: -113.4595525, geocodePrecision: 'address' },
+  { city: 'Edmonton', address: '2479 Alces Link SW', community: 'Alces', beds: 3, baths: 2.5, sqft: 1537, price: 489998, priceNote: 'GST included', possession: 'Immediate', features: ['Side Entry', 'Rear Kitchen'], nearSchool: true, nearGrocery: false, nearPark: true, url: 'https://www.daytonahomes.ca/greater-edmonton/homes/alcrpl-007-039', lat: 53.4283106, lng: -113.3775223, geocodePrecision: 'address' },
+  { city: 'Edmonton', address: '2018 Callihoo Link SW', community: 'Chappelle Gardens', beds: 3, baths: 2.5, sqft: 1454, price: 480158, priceNote: 'GST included', possession: 'Immediate', features: [], nearSchool: false, nearGrocery: true, nearPark: true, url: 'https://www.daytonahomes.ca/greater-edmonton/homes/chpdx-007-011', lat: 53.4071766, lng: -113.554081, geocodePrecision: 'address' },
+  { city: 'Edmonton', address: '18844 28 Avenue NW', community: 'The Uplands at Riverview', beds: 3, baths: 2.5, sqft: 1537, price: 472499, priceNote: 'GST included', possession: 'Immediate', features: ['Side Entry', 'Built Green Certified Gold'], nearSchool: true, nearGrocery: false, nearPark: false, url: 'https://www.daytonahomes.ca/greater-edmonton/homes/rvw-027-043', lat: 53.4595327, lng: -113.4245983, geocodePrecision: 'address' },
+  { city: 'Edmonton', address: '728 157 Avenue NE', community: 'Quarry Vista', beds: 3, baths: 2.5, sqft: 1956, price: 589339, priceNote: 'GST included', possession: 'Immediate', features: ['Main Floor Bed & Bath', 'Side Entry'], nearSchool: false, nearGrocery: false, nearPark: true, url: 'https://www.daytonahomes.ca/greater-edmonton/homes/qvf-004-019', lat: 53.6176917, lng: -113.3409824, geocodePrecision: 'address' },
+  { city: 'Edmonton', address: '2475 Alces Link SW', community: 'Alces', beds: 4, baths: 3, sqft: 1707, price: 512616, priceNote: 'GST included', possession: 'Immediate', features: ['Main Floor Bed & Bath', 'Side Entry'], nearSchool: true, nearGrocery: false, nearPark: true, url: 'https://www.daytonahomes.ca/greater-edmonton/homes/alcrpl-007-037', lat: 53.4283106, lng: -113.3775223, geocodePrecision: 'address' },
+  { city: 'Edmonton', address: '2046 Callihoo Link SW', community: 'Chappelle Gardens', beds: 3, baths: 2.5, sqft: 1454, price: 498864, priceNote: 'GST included', possession: 'November 2026', features: [], nearSchool: false, nearGrocery: true, nearPark: true, url: 'https://www.daytonahomes.ca/greater-edmonton/homes/chpdx-007-025', lat: 53.4071766, lng: -113.554081, geocodePrecision: 'address' },
 
-  // ---------- EDMONTON (placeholder additions, fictional address, real community names) ----------
-  { city: 'Edmonton', address: '4210 Alces Way SW', community: 'Alces', beds: 4, baths: 2.5, sqft: 2040, price: 598900, priceNote: 'GST included', possession: 'November 2026', features: ['Side Entry', 'Walk-Through Pantry'], nearSchool: true, nearGrocery: false, nearPark: true },
-  { city: 'Edmonton', address: '1187 Orchards Boulevard SW', community: 'The Orchards at Ellerslie', beds: 3, baths: 2.5, sqft: 1690, price: 521450, priceNote: 'GST included', possession: 'Immediate', features: ['Side Entry', 'Fireplace'], nearSchool: false, nearGrocery: true, nearPark: true },
-  { city: 'Edmonton', address: '9944 Glenridding Ravine Terrace SW', community: 'Glenridding Ravine', beds: 4, baths: 3, sqft: 2210, price: 668300, priceNote: 'GST included', possession: 'January 2027', features: ['Walk-Out Basement', 'Vaulted Ceiling'], nearSchool: true, nearGrocery: false, nearPark: true },
-  { city: 'Edmonton', address: '3312 Crystallina Nera Way NW', community: 'Crystallina Nera', beds: 3, baths: 2.5, sqft: 1595, price: 476200, priceNote: 'GST included', possession: 'October 2026', features: ['Side Entry', 'Corner Lot'], nearSchool: false, nearGrocery: true, nearPark: false },
-  { city: 'Edmonton', address: '212 Kinglet Landing NW', community: 'Kinglet by Big Lake', beds: 3, baths: 2.5, sqft: 1730, price: 534700, priceNote: 'GST included', possession: 'December 2026', features: ['Side Entry', 'Rear Deck'], nearSchool: true, nearGrocery: true, nearPark: false },
-  { city: 'Edmonton', address: '2278 Chappelle Way SW', community: 'Chappelle Gardens', beds: 5, baths: 3, sqft: 2450, price: 712500, priceNote: 'GST included', possession: 'February 2027', features: ['Main Floor Den', 'Executive Kitchen Appliances'], nearSchool: true, nearGrocery: false, nearPark: false },
-  { city: 'Edmonton', address: '8560 Rosenthal Link NW', community: 'Rosemont', beds: 2, baths: 2, sqft: 980, price: 372900, priceNote: 'GST included', possession: 'Immediate', features: ['Luxury Vinyl Plank'], nearSchool: false, nearGrocery: true, nearPark: false },
-  { city: 'Edmonton', address: '9231 Edgemont Bend NW', community: 'Edgemont', beds: 4, baths: 3, sqft: 2115, price: 619400, priceNote: 'GST included', possession: 'March 2027', features: ['Side Entry', 'Prep Kitchen'], nearSchool: true, nearGrocery: true, nearPark: true },
-  { city: 'Edmonton', address: '150 Mustang Terrace', community: 'Ardrossan', beds: 4, baths: 2.5, sqft: 1940, price: 556800, priceNote: 'GST included', possession: 'Coming 2027', features: ['Side Entry', 'Rear Kitchen'], nearSchool: false, nearGrocery: false, nearPark: true },
-  { city: 'Edmonton', address: '15840 3 Street NE', community: 'Quarry Vista', beds: 2, baths: 2, sqft: 1150, price: 418500, priceNote: 'GST included', possession: 'August 2026', features: ["9' Foundation"], nearSchool: true, nearGrocery: true, nearPark: false },
+  // ---------- CALGARY (real, live — identified by model name, not street address, per Daytona's own Calgary site display) ----------
+  { city: 'Calgary', address: 'The Valencia R', community: 'Harmony', beds: 3, baths: 2.5, sqft: 2465, price: 882900, priceNote: 'GST included', possession: 'Contact for date', features: ['Triple Car Detached Garage', 'Open to Below', 'Side Entry', 'Main Floor Den', 'Built Green Gold'], nearSchool: false, nearGrocery: true, nearPark: false, url: 'https://daytonahomes.ca/greater-calgary/homes/har-041-007', lat: 51.0489098, lng: -114.0635983, geocodePrecision: 'community' },
+  { city: 'Calgary', address: 'The Silverado MF', community: 'Rangeview', beds: 4, baths: 2.5, sqft: 2317, price: 749900, priceNote: 'GST included', possession: 'Contact for date', features: ["9' Foundation", 'Optional Side Entry', 'Tiled Ensuite Shower', 'Built Green Gold Certified'], nearSchool: false, nearGrocery: true, nearPark: true, url: 'https://daytonahomes.ca/greater-calgary/homes/ran-035-012', lat: 50.8732494, lng: -113.9176665, geocodePrecision: 'community' },
+  { city: 'Calgary', address: 'The Austyn-z P', community: 'Walden', beds: 3, baths: 2.5, sqft: 2259, price: 805900, priceNote: 'GST included', possession: 'Contact for date', features: ['Pie Lot', "9' Foundation", 'Legal Basement Suite', 'Fireplace', 'Main Floor Den'], nearSchool: true, nearGrocery: false, nearPark: true, url: 'https://daytonahomes.ca/greater-calgary/homes/wald-033-032', lat: 50.8684925, lng: -114.0280852, geocodePrecision: 'community' },
+  { city: 'Calgary', address: 'The Monaco II R', community: 'Harmony', beds: 3, baths: 2.5, sqft: 2358, price: 849900, priceNote: 'GST included', possession: 'Contact for date', features: ['Rear Attached Garage', 'Rear Deck', 'Main Floor Den', 'Fireplace'], nearSchool: false, nearGrocery: false, nearPark: true, url: 'https://daytonahomes.ca/greater-calgary/homes/har-043-004', lat: 51.0489098, lng: -114.0635983, geocodePrecision: 'community' },
+  { city: 'Calgary', address: 'The Alfa E', community: 'Heartland', beds: 3, baths: 2.5, sqft: 2013, price: 649900, priceNote: 'GST included', possession: 'Contact for date', features: ['Optional Side Entry', 'Fireplace', 'Main Floor Den'], nearSchool: true, nearGrocery: true, nearPark: false, url: 'https://daytonahomes.ca/greater-calgary/homes/hea-046-068', lat: 51.0764214, lng: -113.9346372, geocodePrecision: 'community' },
+  { city: 'Calgary', address: 'The Austyn-z B', community: 'Creekstone', beds: 3, baths: 2.5, sqft: 2259, price: 704667, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: ["9' Foundation", 'Optional Side Entry', 'Main Floor Den', 'U-Shaped Kitchen'], nearSchool: false, nearGrocery: true, nearPark: false, url: 'https://daytonahomes.ca/greater-calgary/homes/crsf-060-004', lat: 50.8596971, lng: -114.0621307, geocodePrecision: 'community' },
+  { city: 'Calgary', address: 'The Silverstone F', community: 'Harmony', beds: 3, baths: 2.5, sqft: 2521, price: 895143, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: ['Triple Car Detached Garage', 'Fireplace'], nearSchool: false, nearGrocery: false, nearPark: true, url: 'https://daytonahomes.ca/greater-calgary/homes/har-105-004', lat: 51.0489098, lng: -114.0635983, geocodePrecision: 'community' },
+  { city: 'Calgary', address: 'The Frontier HS', community: 'Heartland', beds: 3, baths: 2.5, sqft: 1433, price: null, priceNote: 'Sale Pending', possession: 'Contact for date', features: ["9' Foundation", 'Optional Side Entry', 'Built Green Gold Certified'], nearSchool: true, nearGrocery: false, nearPark: false, url: 'https://daytonahomes.ca/greater-calgary/homes/head-054-016', lat: 51.0764214, lng: -113.9346372, geocodePrecision: 'community' },
+  { city: 'Calgary', address: 'The Silverado MF', community: 'Rangeview', beds: 4, baths: 2.5, sqft: 2317, price: 749900, priceNote: 'GST included', possession: 'Contact for date', features: ['Optional Side Entry', 'Fireplace', 'Main Floor Tech Space'], nearSchool: false, nearGrocery: true, nearPark: true, url: 'https://daytonahomes.ca/greater-calgary/homes/ran-020-032', lat: 50.8732494, lng: -113.9176665, geocodePrecision: 'community' },
+  { city: 'Calgary', address: 'The Austyn R', community: 'Southbow Landing', beds: 3, baths: 2.5, sqft: 2259, price: 689900, priceNote: 'GST included', possession: 'Contact for date', features: ["9' Foundation", 'Fireplace', 'Main Floor Den', 'Central Bonus Room'], nearSchool: true, nearGrocery: false, nearPark: false, url: 'https://daytonahomes.ca/greater-calgary/homes/sous-005-061', lat: 51.0456064, lng: -114.057541, geocodePrecision: 'city' },
+  { city: 'Calgary', address: 'The Palisade-z II F', community: 'Walden', beds: 3, baths: 2.5, sqft: 1860, price: 728900, priceNote: 'GST included', possession: 'Contact for date', features: ['Backing onto Greenspace', 'Walkout Basement', 'Rear Deck', 'Fireplace'], nearSchool: false, nearGrocery: true, nearPark: true, url: 'https://daytonahomes.ca/greater-calgary/homes/wal-033-019', lat: 50.8684925, lng: -114.0280852, geocodePrecision: 'community' },
+  { city: 'Calgary', address: 'The Breeze II F', community: 'Heartland', beds: 3, baths: 2.5, sqft: 2054, price: 694900, priceNote: 'GST included', possession: 'Contact for date', features: ["9' Foundation", 'Optional Side Entry'], nearSchool: false, nearGrocery: true, nearPark: false, url: 'https://daytonahomes.ca/greater-calgary/homes/her-13-015', lat: 51.0764214, lng: -113.9346372, geocodePrecision: 'community' },
 
-  // ---------- CALGARY (real, identified by model name — Daytona's Calgary site doesn't list street addresses) ----------
-  { city: 'Calgary', address: 'The Romeo CT (Southbow Landing)', community: 'Southbow Landing', beds: 3, baths: 2.5, sqft: 1824, price: 649900, priceNote: 'GST included', possession: 'Contact for date', features: ["9' Foundation", 'Optional Side Entry'], nearSchool: true, nearGrocery: false, nearPark: false },
-  { city: 'Calgary', address: 'The Silverado MF (Rangeview)', community: 'Rangeview', beds: 4, baths: 2.5, sqft: 2317, price: 749900, priceNote: 'GST included', possession: 'Contact for date', features: ["9' Foundation", 'Optional Side Entry', 'Built Green Gold Certified'], nearSchool: false, nearGrocery: true, nearPark: true },
-  { city: 'Calgary', address: 'The Austyn-Z P (Walden)', community: 'Walden', beds: 3, baths: 2.5, sqft: 2259, price: 805900, priceNote: 'GST included', possession: 'Contact for date', features: ['Pie Lot', 'Legal Basement Suite', 'Fireplace', 'Main Floor Den'], nearSchool: true, nearGrocery: false, nearPark: true },
-  { city: 'Calgary', address: 'The Monaco II R (Harmony)', community: 'Harmony', beds: 3, baths: 2.5, sqft: 2358, price: 849900, priceNote: 'GST included', possession: 'Contact for date', features: ['Rear Attached Garage', 'Rear Deck', 'Main Floor Den', 'Fireplace'], nearSchool: false, nearGrocery: false, nearPark: true },
-  { city: 'Calgary', address: 'The Alfa E (Heartland)', community: 'Heartland', beds: 3, baths: 2.5, sqft: 2013, price: 649900, priceNote: 'GST included', possession: 'Contact for date', features: ['Optional Side Entry', 'Fireplace', 'Main Floor Den'], nearSchool: true, nearGrocery: true, nearPark: false },
-  { city: 'Calgary', address: 'The Frontier HS (Heartland)', community: 'Heartland', beds: 3, baths: 2.5, sqft: 1433, price: 469900, priceNote: 'GST included', possession: 'Contact for date', features: ["9' Foundation", 'Optional Side Entry', 'Built Green Gold Certified'], nearSchool: true, nearGrocery: false, nearPark: false },
-  { city: 'Calgary', address: 'The Valencia R (Harmony)', community: 'Harmony', beds: 3, baths: 2.5, sqft: 2465, price: 882900, priceNote: 'GST included', possession: 'Contact for date', features: ['Triple Car Detached Garage', 'Side Entry', 'Main Floor Den', 'Built Green Gold'], nearSchool: false, nearGrocery: true, nearPark: false },
-  { city: 'Calgary', address: 'The Breeze II F (Heartland)', community: 'Heartland', beds: 3, baths: 2.5, sqft: 2054, price: 694900, priceNote: 'GST included', possession: 'Contact for date', features: ["9' Foundation", 'Optional Side Entry'], nearSchool: false, nearGrocery: true, nearPark: true },
-  { city: 'Calgary', address: 'The Austyn R (Southbow Landing)', community: 'Southbow Landing', beds: 3, baths: 2.5, sqft: 2259, price: 689900, priceNote: 'GST included', possession: 'Contact for date', features: ["9' Foundation", 'Fireplace', 'Main Floor Den', 'Central Bonus Room'], nearSchool: true, nearGrocery: false, nearPark: false },
-  { city: 'Calgary', address: 'The Palisade II R (Southbow Landing)', community: 'Southbow Landing', beds: 3, baths: 2.5, sqft: 1860, price: 639900, priceNote: 'GST included', possession: 'Contact for date', features: ['Sunshine Basement', 'Optional Side Entry', 'Built Green Gold Certified'], nearSchool: false, nearGrocery: true, nearPark: false },
-
-  // ---------- WINNIPEG (real) ----------
-  { city: 'Winnipeg', address: '35 Perseus Way', community: 'Aurora', beds: 3, baths: 2.5, sqft: 1520, price: 572884, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: true, nearGrocery: true, nearPark: false },
-  { city: 'Winnipeg', address: '53 Kite Bay', community: 'Highland Pointe', beds: 4, baths: 3, sqft: 1695, price: 584115, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: false, nearGrocery: false, nearPark: true },
-  { city: 'Winnipeg', address: '132 Mosaic Street', community: 'Summerlea', beds: 3, baths: 2.5, sqft: 1327, price: 398248, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: true, nearGrocery: false, nearPark: false },
-  { city: 'Winnipeg', address: '118 Kite Bay', community: 'Highland Pointe', beds: 3, baths: 2, sqft: 1579, price: 539940, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: false, nearGrocery: true, nearPark: false },
-  { city: 'Winnipeg', address: '34 Bill Brierclliffe', community: 'Devonshire Park', beds: 3, baths: 2.5, sqft: 1488, price: 509180, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: true, nearGrocery: true, nearPark: true },
-  { city: 'Winnipeg', address: '129 Mill Rock Road', community: 'Highland Pointe', beds: 4, baths: 3, sqft: 1882, price: 701806, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: false, nearGrocery: false, nearPark: false },
-  { city: 'Winnipeg', address: '295 Avior Drive', community: 'Aurora', beds: 3, baths: 2.5, sqft: 1488, price: 490381, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: true, nearGrocery: false, nearPark: true },
-  { city: 'Winnipeg', address: '79 Pegasus Street', community: 'Aurora', beds: 3, baths: 2, sqft: 1579, price: 545287, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: false, nearGrocery: true, nearPark: false },
-  { city: 'Winnipeg', address: '83 Pegasus Street', community: 'Aurora', beds: 4, baths: 3, sqft: 1695, price: 580412, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: true, nearGrocery: true, nearPark: false },
-  { city: 'Winnipeg', address: '128 Mosaic Street', community: 'Summerlea', beds: 3, baths: 2.5, sqft: 1327, price: 398248, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: false, nearGrocery: false, nearPark: true }
+  // ---------- WINNIPEG (real, live) ----------
+  { city: 'Winnipeg', address: '129 Mill Rock Road', community: 'Highland Pointe', beds: 4, baths: 3, sqft: 1882, price: 701806, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: false, nearGrocery: false, nearPark: false, url: 'https://daytonahomes.ca/winnipeg/homes/hlp-004-018', lat: 49.8955367, lng: -97.1384584, geocodePrecision: 'city' },
+  { city: 'Winnipeg', address: '53 Kite Bay', community: 'Highland Pointe', beds: 4, baths: 3, sqft: 1695, price: 584115, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: false, nearGrocery: false, nearPark: true, url: 'https://daytonahomes.ca/winnipeg/homes/hlp-005-008', lat: 49.8955367, lng: -97.1384584, geocodePrecision: 'city' },
+  { city: 'Winnipeg', address: '103-1510 Waverly Street', community: 'Prairie Pointe', beds: 2, baths: 2.5, sqft: 1175, price: 357817, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: false, nearGrocery: true, nearPark: false, url: 'https://daytonahomes.ca/winnipeg/homes/solt-002-103', lat: 49.7768624, lng: -97.2007592, geocodePrecision: 'community' },
+  { city: 'Winnipeg', address: '132 Mosaic Street', community: 'Summerlea', beds: 3, baths: 2.5, sqft: 1327, price: 398248, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: true, nearGrocery: false, nearPark: false, url: 'https://daytonahomes.ca/winnipeg/homes/sumth-013-012', lat: 49.912163, lng: -96.9781067, geocodePrecision: 'community' },
+  { city: 'Winnipeg', address: '118 Kite Bay', community: 'Highland Pointe', beds: 3, baths: 2, sqft: 1579, price: 539940, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: false, nearGrocery: true, nearPark: false, url: 'https://daytonahomes.ca/winnipeg/homes/hlp-007-008', lat: 49.8955367, lng: -97.1384584, geocodePrecision: 'city' },
+  { city: 'Winnipeg', address: '124 Mosaic Street', community: 'Summerlea', beds: 3, baths: 2.5, sqft: 1327, price: 398248, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: true, nearGrocery: false, nearPark: false, url: 'https://daytonahomes.ca/winnipeg/homes/sumth-013-014', lat: 49.912163, lng: -96.9781067, geocodePrecision: 'community' },
+  { city: 'Winnipeg', address: '34 Bill Brierclliffe', community: 'Devonshire Park', beds: 3, baths: 2.5, sqft: 1488, price: 509180, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: true, nearGrocery: true, nearPark: true, url: 'https://daytonahomes.ca/winnipeg/homes/dev-005-007a', lat: 49.9068973, lng: -97.0186036, geocodePrecision: 'community' },
+  { city: 'Winnipeg', address: '1201-1510 Waverly Street', community: 'Prairie Pointe', beds: 3, baths: 2.5, sqft: 1524, price: 444784, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: false, nearGrocery: true, nearPark: false, url: 'https://daytonahomes.ca/winnipeg/homes/solt-002-1201', lat: 49.7768624, lng: -97.2007592, geocodePrecision: 'community' },
+  { city: 'Winnipeg', address: '79 Pegasus Street', community: 'Aurora', beds: 3, baths: 2, sqft: 1579, price: 545287, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: true, nearGrocery: false, nearPark: true, url: 'https://daytonahomes.ca/winnipeg/homes/aura-001-005a', lat: 49.8007788, lng: -97.1369216, geocodePrecision: 'community' },
+  { city: 'Winnipeg', address: '120 Mosaic Street', community: 'Summerlea', beds: 3, baths: 2.5, sqft: 1400, price: 411366, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: true, nearGrocery: false, nearPark: false, url: 'https://daytonahomes.ca/winnipeg/homes/sumth-013-015', lat: 49.912163, lng: -96.9781067, geocodePrecision: 'community' },
+  { city: 'Winnipeg', address: '185 Treetop Lane', community: 'Highland Pointe', beds: 3, baths: 2.5, sqft: 1400, price: 433378, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: false, nearGrocery: false, nearPark: true, url: 'https://daytonahomes.ca/winnipeg/homes/hlpd-007-004', lat: 49.8955367, lng: -97.1384584, geocodePrecision: 'city' },
+  { city: 'Winnipeg', address: '128 Mosaic Street', community: 'Summerlea', beds: 3, baths: 2.5, sqft: 1327, price: 398248, priceNote: 'Pre-GST, includes home & lot', possession: 'Contact for date', features: [], nearSchool: true, nearGrocery: false, nearPark: false, url: 'https://daytonahomes.ca/winnipeg/homes/sumth-013-013', lat: 49.912163, lng: -96.9781067, geocodePrecision: 'community' }
 ];
 
 // ============================================================
@@ -105,15 +118,15 @@ FACTS YOU KNOW (do not go beyond these; if asked something not covered, say some
 - The home-building process has three steps: (1) choose a community, (2) find a floorplan/model, (3) meet a consultant at a showhome to customize finishings.
 - They also sell move-in-ready "quick possession" homes (30-90 days typical, some immediate) in addition to custom builds.
 - Home types include single-family front-attached garage, detached garage, duplex, townhome, bungalow, and condo (Ambrea at the Orchards in Edmonton, The Bowbank at Rockland Park in Calgary, Solara in Winnipeg).
-- Edmonton-area communities include Chappelle Gardens, Rosemont, Edgemont, Quarry Vista, Ardrossan, Alces, The Orchards at Ellerslie, Glenridding Ravine, Crystallina Nera, and Kinglet by Big Lake.
-- Calgary-area communities include Southbow Landing, Rangeview, Walden, Harmony, and Heartland (North/Southeast Calgary, Cochrane, and Springbank Area).
+- Edmonton-area communities include Chappelle Gardens, Rosemont, Edgemont, Quarry Vista, Alces, The Orchards at Ellerslie, The Uplands at Riverview.
+- Calgary-area communities include Southbow Landing, Rangeview, Walden, Harmony, Heartland, and Creekstone (North/Southeast Calgary, Cochrane, and Springbank Area).
 - Winnipeg communities include Aurora, Highland Pointe, Summerlea, Devonshire Park, and Prairie Pointe.
 - Warranty (Greater Edmonton): handled by Tacada Customer Care (Daytona Homes is a Tacada company) — 1-877-788-7689, Customercare@tacada.ca, Mon-Thurs 8am-5pm, Fri 8am-4pm. Warranty contacts for Calgary and Winnipeg are not loaded in this demo — if asked, say you don't have that detail and point them to daytonahomes.ca/warranty.
 
 DEMO CUSTOMER SERVICE CONTACT — if a visitor wants to speak to a real person, has a question this demo can't answer, or you're using the fallback line above, offer this in addition: this demo's support contact is contact@reysan.ca, monitored weekdays 8am-5pm. If it's currently outside those hours, say so honestly (something like "it's outside our demo support hours right now, so a reply might take a bit, but you're welcome to email anyway") — don't pretend someone will respond instantly outside business hours, but don't discourage them from trying either. For real Daytona warranty or sales questions specifically, still give the real regional phone number/email from FACTS above as the primary contact — contact@reysan.ca is only for questions about this AI demo itself, not a substitute for Daytona's actual customer service.
-- There are currently 143 move-in-ready listings in Edmonton, 63 in Calgary, and 30 in Winnipeg (this demo only has a sample of 40 total for illustration — 20 Edmonton, 10 Calgary, 10 Winnipeg).
+- Listings shown in this demo are a real, live snapshot pulled directly from daytonahomes.ca — not fictional placeholders. That said, real listings change (sale pending, sold, new ones posted) faster than this demo dataset refreshes, so mention that current availability should be confirmed directly on daytonahomes.ca or with Daytona.
 
-CURRENT LISTINGS (JSON — use ONLY these for specific home recommendations, and filter by the "city" field to match what the visitor said). The nearSchool/nearGrocery/nearPark flags are placeholder demo data, not verified proximity — if asked, say proximity search is a preview/demo feature and the flag is illustrative, not a guarantee. Note priceNote: Edmonton and Calgary prices are GST-included; Winnipeg prices are pre-GST (home & lot) — mention this if a visitor asks about final price:
+CURRENT LISTINGS (JSON — use ONLY these for specific home recommendations, and filter by the "city" field to match what the visitor said). The nearSchool/nearGrocery/nearPark flags are placeholder demo data, not verified proximity — if asked, say proximity search is a preview/demo feature and the flag is illustrative, not a guarantee. Note priceNote: Edmonton and Calgary prices are GST-included; Winnipeg prices are pre-GST (home & lot) — mention this if a visitor asks about final price. Some entries have price: null with priceNote "Sale Pending" — if a visitor asks about one of these, say it's currently sale pending rather than quoting a price:
 ${JSON.stringify(LISTINGS, null, 2)}
 
 GUIDED INTAKE FLOW — if a visitor says they're looking for a home, wants a recommendation, or otherwise signals home-shopping intent (not just a general FAQ question), walk them through these four questions ONE AT A TIME, waiting for their answer before asking the next. Don't dump all four at once.
@@ -122,14 +135,12 @@ GUIDED INTAKE FLOW — if a visitor says they're looking for a home, wants a rec
 3. "How many bedrooms are you looking for?"
 4. "Is there anything specific you'd like — for example, close to a school, grocery store, or park?"
 Once all four are answered, filter LISTINGS to the chosen city and recommend 1-3 matching homes using their other answers. If a visitor volunteers several of these in one message, don't re-ask what they already gave you — just fill in whichever are still missing, then recommend.
-5. Whenever you suggest or recommend a specific listing to the user, after 
-presenting it, ask: "Want to see how sunlight and shadows move across this 
-property throughout the day?"
-
-If they say yes, reply with this link using that listing's coordinates:
-https://reysan.ca/daytona/shadow-check.html?lat={listing_lat}&lng={listing_lng}
-
-Do not fabricate shadow or sunlight claims yourself — only offer the link.
+5. Whenever you suggest or recommend a specific listing to the user, share its direct listing page using the "url" field from that listing's data, in plain text like: "You can view the full listing here: [url]"
+Then ask: "Want to see how sunlight and shadows move across this property throughout the day?"
+If they say yes, use that listing's "lat" and "lng" fields to build this link:
+https://reysan.ca/daytona/shadow-check.html?lat=[lat]&lng=[lng]
+If a listing's "geocodePrecision" field is "community" or "city" rather than "address", you can still share the link, but mention that the sun/shadow view is centered on the general neighborhood rather than the exact lot, since exact address-level location data wasn't available for that one.
+Do not fabricate shadow, sunlight, or coordinate claims yourself — only use the lat/lng values actually present in the listing data, and never guess or invent coordinates for a listing that's missing them.
 If the visitor is just asking a general FAQ question and hasn't signaled they want a home recommendation, skip this flow and answer normally.
 
 Rules:
