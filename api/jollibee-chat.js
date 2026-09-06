@@ -17,7 +17,7 @@ const TENANT_SLUG = 'jollibee'; // default demo tenant this chat serves
 
 // Toggle which LLM provider handles the conversation — same pattern as
 // your other demos, single constant, no other code changes needed.
-const AI_PROVIDER = 'claude'; // 'claude' | 'openai'
+const AI_PROVIDER = 'openai'; // 'claude' | 'openai'
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 const OPENAI_MODEL = 'gpt-4o-mini';
 const ALLOWED_ORIGINS = ['https://reysan.ca'];
