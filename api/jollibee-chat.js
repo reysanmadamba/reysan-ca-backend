@@ -88,7 +88,12 @@ Formatting: this is a plain-text chat window, not a document. Never use markdown
 
 Phone numbers: whenever you write a phone number back to the customer (confirming it, repeating it), format it with dashes in groups (e.g. 587-123-4321), never as one unbroken string of digits.
 
-Editing an order after confirming it: if the customer wants to add something after you've already called confirm_order once in this conversation, call confirm_order again with ONLY the new addition — not the earlier items repeated. The backend either merges it into the existing order (if the store hasn't accepted it yet) or creates a clean new order containing just the addition (if the store already accepted the first one). If the tool result comes back with new_separate_order: true, tell the customer plainly that this is a second, separate order — e.g. "just a heads up, your first order's already being prepared, so I've put this as a separate order, number [X]."`;
+Confirming an order — never skip the preview step:
+1. Before calling confirm_order, always say back the FULL list you're about to submit and its total, then ask something like "should I go ahead with that?" — in plain text, no tool call.
+2. Only call confirm_order after the customer's NEXT message is a clear yes to that exact preview. A bare "yes" that's just acknowledging information (not answering a "should I proceed?" question) is not a confirmation — if you're unsure what they meant, ask again rather than guessing.
+3. Send the FULL order every time you call confirm_order — everything the customer wants in total, not just what's new. This is safe to repeat; calling it twice with the same list does not double anything.
+4. If the customer wants to remove or reduce something: restate the updated full list first ("so that'd bring it down to just one Halo-Halo, total $X — want me to go ahead?") and wait for their yes, exactly like adding something. Never remove or change anything silently.
+5. If confirm_order comes back with new_separate_order: true, the original was already accepted and being prepared — only the genuinely new items became a second order. Tell the customer this as one running tab using the combined_total from the result, and don't do that addition yourself.`;
 
 const tools = [
   {
@@ -147,7 +152,7 @@ const tools = [
   },
   {
     name: 'confirm_order',
-    description: 'Confirm the items the customer just agreed to. Only callable after verify_otp has succeeded. Send ONLY what\'s being confirmed in this call — for a first order that\'s everything they want; if they\'re adding to an order you already confirmed earlier in this conversation, send just the new addition, not the earlier items again. The backend handles combining or separating these correctly on its own.',
+    description: 'Confirm the customer\'s order. ALWAYS send the FULL list of everything they currently want — not just what changed. This is safe to call more than once with the same list (it won\'t double-add), so don\'t worry about tracking deltas yourself. The backend handles merging into an existing order, splitting into a new one if the store already accepted the original, or computing the combined total — you just report what comes back.',
     input_schema: {
       type: 'object',
       properties: {
@@ -278,36 +283,27 @@ async function searchMenu({ category, keyword, veg_only, max_price }, tenantId) 
 
 const GST_RATE = 0.05; // Alberta: 5% federal GST, no provincial sales tax
 
-// `items` here is ALWAYS just what's being newly confirmed in this call —
-// never the full cumulative cart. The backend decides whether that merges
-// into an existing order or becomes a fresh one, so the AI's job stays
-// simple and can't accidentally duplicate items across two tickets.
-async function confirmOrder({ items: newItems, note }, tenantId, customerId, phoneVerified, existingOrderId) {
+// `items` here is always the FULL order as the customer currently wants it —
+// not a delta. This makes the operation idempotent: calling confirm_order
+// twice in a row with the same list produces the same result both times,
+// instead of compounding (which is what happened when the AI called this
+// twice for the same request — additive deltas turned "add 1" into "add 2").
+async function confirmOrder({ items: fullItems, note }, tenantId, customerId, phoneVerified, existingOrderId) {
   if (!phoneVerified) return { error: 'Phone number must be verified before placing an order.' };
-
-  let splitBecauseAccepted = false;
-  let previousOrderTotal = 0;
 
   if (existingOrderId) {
     const { data: existing } = await supabase.from('orders').select('*').eq('id', existingOrderId).maybeSingle();
 
     if (existing && existing.status === 'new') {
-      // Merge by quantity — same menu item adds to its existing line
-      // instead of appearing twice, matching real order-ticket behavior.
-      const mergedItems = existing.items.map((i) => ({ ...i }));
-      for (const newItem of newItems) {
-        const match = mergedItems.find((i) => i.menu_item_id === newItem.menu_item_id);
-        if (match) match.qty += newItem.qty;
-        else mergedItems.push({ ...newItem });
-      }
-
-      const subtotal = mergedItems.reduce((sum, i) => sum + i.qty * i.price, 0);
+      // Still editable — REPLACE the order with exactly what was just
+      // confirmed. No addition, no arithmetic to get wrong, safe to repeat.
+      const subtotal = fullItems.reduce((sum, i) => sum + i.qty * i.price, 0);
       const tax = subtotal * GST_RATE;
       const total = subtotal + tax;
 
       const { data, error } = await supabase
         .from('orders')
-        .update({ items: mergedItems, subtotal: subtotal.toFixed(2), tax: tax.toFixed(2), total: total.toFixed(2), note: note || existing.note })
+        .update({ items: fullItems, subtotal: subtotal.toFixed(2), tax: tax.toFixed(2), total: total.toFixed(2), note: note ?? existing.note })
         .eq('id', existingOrderId)
         .select()
         .single();
@@ -316,14 +312,48 @@ async function confirmOrder({ items: newItems, note }, tenantId, customerId, pho
     }
 
     if (existing) {
-      splitBecauseAccepted = true;
-      previousOrderTotal = Number(existing.total || 0);
+      // Already accepted — the kitchen may be preparing it, so it can't be
+      // edited. The BACKEND computes what's actually new (fullItems minus
+      // what's already in the accepted order), rather than trusting the AI
+      // to have tracked that correctly itself.
+      const diffItems = [];
+      for (const item of fullItems) {
+        const already = existing.items.find((i) => i.menu_item_id === item.menu_item_id);
+        const alreadyQty = already ? already.qty : 0;
+        const newQty = item.qty - alreadyQty;
+        if (newQty > 0) diffItems.push({ ...item, qty: newQty });
+      }
+
+      if (diffItems.length === 0) {
+        return { error: "That order's already being prepared and can't be changed — but I can start a new order for anything additional." };
+      }
+
+      const subtotal = diffItems.reduce((sum, i) => sum + i.qty * i.price, 0);
+      const tax = subtotal * GST_RATE;
+      const total = subtotal + tax;
+
+      const { data, error } = await supabase
+        .from('orders')
+        .insert({ tenant_id: tenantId, customer_id: customerId, items: diffItems, subtotal: subtotal.toFixed(2), tax: tax.toFixed(2), total: total.toFixed(2), note: note || null, status: 'new' })
+        .select()
+        .single();
+      if (error) return { error: error.message };
+      return {
+        order_id: data.id,
+        order_number: data.order_number,
+        subtotal: data.subtotal,
+        tax: data.tax,
+        total: data.total,
+        status: data.status,
+        new_separate_order: true,
+        combined_total: (Number(existing.total || 0) + total).toFixed(2),
+        note_for_ai: 'The previous order was already accepted and is being prepared, so only the newly added item(s) were placed as a new, separate order. Tell the customer this as one running tab — mention the new order number and combined_total, not two unrelated charges.'
+      };
     }
   }
 
-  // First order, or a split because the previous one is already accepted —
-  // either way, newItems is exactly what goes on this ticket, nothing more.
-  const subtotal = newItems.reduce((sum, i) => sum + i.qty * i.price, 0);
+  // No existing order at all — this is the first order.
+  const subtotal = fullItems.reduce((sum, i) => sum + i.qty * i.price, 0);
   const tax = subtotal * GST_RATE;
   const total = subtotal + tax;
 
@@ -332,7 +362,7 @@ async function confirmOrder({ items: newItems, note }, tenantId, customerId, pho
     .insert({
       tenant_id: tenantId,
       customer_id: customerId,
-      items: newItems,
+      items: fullItems,
       subtotal: subtotal.toFixed(2),
       tax: tax.toFixed(2),
       total: total.toFixed(2),
@@ -342,19 +372,7 @@ async function confirmOrder({ items: newItems, note }, tenantId, customerId, pho
     .select()
     .single();
   if (error) return { error: error.message };
-  return {
-    order_id: data.id,
-    order_number: data.order_number,
-    subtotal: data.subtotal,
-    tax: data.tax,
-    total: data.total,
-    status: data.status,
-    ...(splitBecauseAccepted && {
-      new_separate_order: true,
-      combined_total: (previousOrderTotal + total).toFixed(2),
-      note_for_ai: 'The previous order was already accepted and is being prepared, so this had to be placed as a new, separate order containing ONLY what was just added. Tell the customer this as one running tab, not two unrelated charges — e.g. "your original order is being prepared, and I\'ve added this as order #[X] for just the new item(s), so your total across both comes to $[combined_total from this result — use it exactly, don\'t add the numbers yourself]."'
-    })
-  };
+  return { order_id: data.id, order_number: data.order_number, subtotal: data.subtotal, tax: data.tax, total: data.total, status: data.status };
 }
 
 function computeRemainingMinutes(order) {
