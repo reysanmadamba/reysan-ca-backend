@@ -167,6 +167,10 @@ async function requestOtp({ name, phone }, tenantId) {
         .eq('phone', phone)
         .maybeSingle();
 
+    if (customer?.banned) {
+        return { error: 'This phone number is not able to order online right now. Please call the store directly.' };
+    }
+
     if (!customer) {
         const { data: newCustomer, error } = await supabase
             .from('customers')
@@ -232,9 +236,13 @@ async function searchMenu({ category, keyword, veg_only, max_price }, tenantId) 
     return { results };
 }
 
+const GST_RATE = 0.05; // Alberta: 5% federal GST, no provincial sales tax
+
 async function confirmOrder({ items, note }, tenantId, customerId, phoneVerified) {
     if (!phoneVerified) return { error: 'Phone number must be verified before placing an order.' };
     const subtotal = items.reduce((sum, i) => sum + i.qty * i.price, 0);
+    const tax = subtotal * GST_RATE;
+    const total = subtotal + tax;
     const { data, error } = await supabase
         .from('orders')
         .insert({
@@ -242,13 +250,15 @@ async function confirmOrder({ items, note }, tenantId, customerId, phoneVerified
             customer_id: customerId,
             items,
             subtotal: subtotal.toFixed(2),
+            tax: tax.toFixed(2),
+            total: total.toFixed(2),
             note: note || null,
             status: 'new'
         })
         .select()
         .single();
     if (error) return { error: error.message };
-    return { order_id: data.id, subtotal: data.subtotal, status: data.status };
+    return { order_id: data.id, subtotal: data.subtotal, tax: data.tax, total: data.total, status: data.status };
 }
 
 export default async function handler(req, res) {
