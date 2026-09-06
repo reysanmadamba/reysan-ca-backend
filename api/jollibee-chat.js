@@ -12,6 +12,7 @@
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { verifyToken } from './jollibee-captcha.js';
+import { confirmOrder, computeRemainingMinutes } from '../lib/ordering.js';
 
 const TENANT_SLUG = 'jollibee'; // default demo tenant this chat serves
 
@@ -300,139 +301,7 @@ async function searchMenu({ category, keyword, veg_only, max_price }, tenantId) 
   return { results };
 }
 
-const GST_RATE = 0.05; // Alberta: 5% federal GST, no provincial sales tax
 
-// `items` here is always the FULL order as the customer currently wants it —
-// not a delta. This makes the operation idempotent: calling confirm_order
-// twice in a row with the same list produces the same result both times,
-// instead of compounding (which is what happened when the AI called this
-// twice for the same request — additive deltas turned "add 1" into "add 2").
-// The AI's confirm_order call includes a price per item, but that number
-// comes from the model's own memory of the conversation — never trust it
-// for anything that gets charged. Always re-look-up the real price (and
-// confirm the item still exists/is active) directly from menu_items.
-async function resolveAuthoritativePrices(items, tenantId) {
-  const ids = items.map((i) => i.menu_item_id);
-  const { data: menuRows, error } = await supabase
-    .from('menu_items')
-    .select('id, name, price, active')
-    .eq('tenant_id', tenantId)
-    .in('id', ids);
-  if (error) throw new Error(error.message);
-
-  const byId = new Map((menuRows || []).map((m) => [m.id, m]));
-  return items.map((item) => {
-    const menuItem = byId.get(item.menu_item_id);
-    if (!menuItem || !menuItem.active) {
-      throw new Error(`${item.name || 'One of those items'} isn't available right now.`);
-    }
-    return { menu_item_id: menuItem.id, name: menuItem.name, qty: item.qty, price: Number(menuItem.price) };
-  });
-}
-
-async function confirmOrder({ items: rawItems, note }, tenantId, customerId, phoneVerified, existingOrderId) {
-  if (!phoneVerified) return { error: 'Phone number must be verified before placing an order.' };
-
-  let fullItems;
-  try {
-    fullItems = await resolveAuthoritativePrices(rawItems, tenantId);
-  } catch (err) {
-    return { error: err.message };
-  }
-
-  if (existingOrderId) {
-    const { data: existing } = await supabase.from('orders').select('*').eq('id', existingOrderId).maybeSingle();
-
-    if (existing && existing.status === 'new') {
-      // Still editable — REPLACE the order with exactly what was just
-      // confirmed. No addition, no arithmetic to get wrong, safe to repeat.
-      const subtotal = fullItems.reduce((sum, i) => sum + i.qty * i.price, 0);
-      const tax = subtotal * GST_RATE;
-      const total = subtotal + tax;
-
-      const { data, error } = await supabase
-        .from('orders')
-        .update({ items: fullItems, subtotal: subtotal.toFixed(2), tax: tax.toFixed(2), total: total.toFixed(2), note: note ?? existing.note })
-        .eq('id', existingOrderId)
-        .select()
-        .single();
-      if (error) return { error: error.message };
-      return { order_id: data.id, order_number: data.order_number, subtotal: data.subtotal, tax: data.tax, total: data.total, status: data.status, updated: true };
-    }
-
-    if (existing) {
-      // Already accepted — the kitchen may be preparing it, so it can't be
-      // edited. The BACKEND computes what's actually new (fullItems minus
-      // what's already in the accepted order), rather than trusting the AI
-      // to have tracked that correctly itself.
-      const diffItems = [];
-      for (const item of fullItems) {
-        const already = existing.items.find((i) => i.menu_item_id === item.menu_item_id);
-        const alreadyQty = already ? already.qty : 0;
-        const newQty = item.qty - alreadyQty;
-        if (newQty > 0) diffItems.push({ ...item, qty: newQty });
-      }
-
-      if (diffItems.length === 0) {
-        return {
-          error: "That order's already being prepared, so nothing can be added — this looks more like a request to reduce or remove something instead.",
-          reduction_requested: true,
-          note_for_ai: 'The customer is trying to reduce/remove from an order that\'s already accepted. Do not attempt this yourself. Tell them you\'ll flag it for staff to call and confirm, then call flag_order_for_staff_review with a clear description of what they want changed.'
-        };
-      }
-
-      const subtotal = diffItems.reduce((sum, i) => sum + i.qty * i.price, 0);
-      const tax = subtotal * GST_RATE;
-      const total = subtotal + tax;
-
-      const { data, error } = await supabase
-        .from('orders')
-        .insert({ tenant_id: tenantId, customer_id: customerId, items: diffItems, subtotal: subtotal.toFixed(2), tax: tax.toFixed(2), total: total.toFixed(2), note: note || null, status: 'new' })
-        .select()
-        .single();
-      if (error) return { error: error.message };
-      return {
-        order_id: data.id,
-        order_number: data.order_number,
-        subtotal: data.subtotal,
-        tax: data.tax,
-        total: data.total,
-        status: data.status,
-        new_separate_order: true,
-        combined_total: (Number(existing.total || 0) + total).toFixed(2),
-        note_for_ai: 'The previous order was already accepted and is being prepared, so only the newly added item(s) were placed as a new, separate order. Tell the customer this as one running tab — mention the new order number and combined_total, not two unrelated charges.'
-      };
-    }
-  }
-
-  // No existing order at all — this is the first order.
-  const subtotal = fullItems.reduce((sum, i) => sum + i.qty * i.price, 0);
-  const tax = subtotal * GST_RATE;
-  const total = subtotal + tax;
-
-  const { data, error } = await supabase
-    .from('orders')
-    .insert({
-      tenant_id: tenantId,
-      customer_id: customerId,
-      items: fullItems,
-      subtotal: subtotal.toFixed(2),
-      tax: tax.toFixed(2),
-      total: total.toFixed(2),
-      note: note || null,
-      status: 'new'
-    })
-    .select()
-    .single();
-  if (error) return { error: error.message };
-  return { order_id: data.id, order_number: data.order_number, subtotal: data.subtotal, tax: data.tax, total: data.total, status: data.status };
-}
-
-function computeRemainingMinutes(order) {
-  if (order.status !== 'accepted' || !order.accepted_at || !order.eta_minutes) return null;
-  const targetMs = new Date(order.accepted_at).getTime() + order.eta_minutes * 60000;
-  return Math.max(0, Math.round((targetMs - Date.now()) / 60000));
-}
 
 async function checkOrderStatus({ phone }, tenantId, contactPhone) {
   const digits = phone.replace(/\D/g, '');
@@ -452,7 +321,7 @@ async function checkOrderStatus({ phone }, tenantId, contactPhone) {
     .from('orders')
     .select('*')
     .eq('customer_id', customer.id)
-    .neq('status', 'completed')
+    .not('status', 'in', '(completed,cancelled)')
     .order('created_at', { ascending: true });
 
   if (!orders || orders.length === 0) return { error: 'No open orders found for that phone number.' };
@@ -542,16 +411,55 @@ export default async function handler(req, res) {
   if (req.body.checkStatus && orderId) {
     const { data: order } = await supabase
       .from('orders')
-      .select('status, eta_minutes, accepted_at')
+      .select('status, eta_minutes, accepted_at, takeover_active')
       .eq('id', orderId)
       .eq('tenant_id', tenantId)
       .maybeSingle();
     if (!order) return res.status(404).json({ error: 'Order not found.' });
+
+    let newMessages = [];
+    if (req.body.messagesSince) {
+      const { data: msgs } = await supabase
+        .from('conversation_messages')
+        .select('sender, message, created_at')
+        .eq('tenant_id', tenantId)
+        .eq('order_id', orderId)
+        .in('sender', ['staff', 'ai'])
+        .gt('created_at', req.body.messagesSince)
+        .order('created_at', { ascending: true });
+      newMessages = msgs || [];
+    }
+
     return res.status(200).json({
       status: order.status,
       eta_minutes: order.eta_minutes,
-      remaining_minutes: computeRemainingMinutes(order)
+      remaining_minutes: computeRemainingMinutes(order),
+      takeoverActive: order.takeover_active,
+      newMessages
     });
+  }
+
+  // If this order is under active staff takeover, log the customer's
+  // message for staff to see and skip the AI entirely — no auto-reply,
+  // no tokens spent, until staff hands control back.
+  if (orderId) {
+    const { data: activeOrder } = await supabase
+      .from('orders')
+      .select('takeover_active, session_id')
+      .eq('id', orderId)
+      .eq('tenant_id', tenantId)
+      .maybeSingle();
+
+    if (activeOrder?.takeover_active) {
+      await supabase.from('conversation_messages').insert({
+        tenant_id: tenantId,
+        session_id: activeOrder.session_id || session.sessionId,
+        order_id: orderId,
+        sender: 'customer',
+        message
+      });
+      return res.status(200).json({ reply: null, takeoverActive: true, customerId, phoneVerified, orderId, offTopicCount });
+    }
   }
 
   // Fix #9: ban check uses the corrected IP from fix #1
@@ -609,7 +517,7 @@ export default async function handler(req, res) {
       return { count: currentOffTopicCount, limit_reached: currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS };
     }
     if (name === 'confirm_order') {
-      const result = await confirmOrder(input, tenantId, currentCustomerId, currentPhoneVerified, currentOrderId);
+      const result = await confirmOrder(input, tenantId, currentCustomerId, currentPhoneVerified, currentOrderId, session.sessionId);
       if (result.order_id) currentOrderId = result.order_id;
       return result;
     }
