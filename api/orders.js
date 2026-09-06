@@ -36,14 +36,20 @@ export default async function handler(req, res) {
     }
 
     if (req.method === 'PATCH') {
-        const { order_id, status, eta_minutes, tenant_id } = req.body;
-        if (!order_id || !status) return res.status(400).json({ error: 'order_id and status are required' });
+        const { order_id, status, eta_minutes, needs_attention, attention_note, tenant_id } = req.body;
+        if (!order_id) return res.status(400).json({ error: 'order_id is required' });
+        if (status === undefined && needs_attention === undefined) {
+            return res.status(400).json({ error: 'status or needs_attention is required' });
+        }
 
         const resolved = resolveTenantId(auth, tenant_id);
         if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
 
-        const update = { status, updated_at: new Date().toISOString() };
+        const update = { updated_at: new Date().toISOString() };
+        if (status !== undefined) update.status = status;
         if (eta_minutes !== undefined) update.eta_minutes = eta_minutes;
+        if (needs_attention !== undefined) update.needs_attention = needs_attention;
+        if (attention_note !== undefined) update.attention_note = attention_note;
 
         const { data: order, error } = await supabaseAdmin
             .from('orders')
