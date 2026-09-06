@@ -1,4 +1,4 @@
-// api/restaurant-captcha.js
+// api/jollibee-captcha.js
 //
 // Verifies a Cloudflare Turnstile token, then issues a signed session
 // token the chat endpoint will require on every message. Fixes applied
@@ -11,8 +11,8 @@
 //   #6  the challenge/verify endpoint itself is rate limited, not just chat
 //   #10 constant-time comparison for the session token HMAC
 
-const crypto = require('crypto');
-const { createClient } = require('@supabase/supabase-js');
+import crypto from 'crypto';
+import { createClient } from '@supabase/supabase-js';
 
 const TENANT = 'jollibee';
 const SESSION_SECRET = process.env.SESSION_HMAC_SECRET;
@@ -42,7 +42,29 @@ function signToken(payload) {
     return `${b64}.${hmac}`;
 }
 
-module.exports = async (req, res) => {
+// Exported so jollibee-chat.js can verify tokens issued here with the
+// same constant-time comparison (fix #10 — no string !== comparison on
+// secret-derived values, which leaks timing information).
+export function verifyToken(token) {
+    try {
+        const [b64, hmac] = token.split('.');
+        const expected = crypto.createHmac('sha256', SESSION_SECRET).update(b64).digest('base64url');
+
+        const a = Buffer.from(hmac);
+        const b = Buffer.from(expected);
+        if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+
+        const payload = JSON.parse(Buffer.from(b64, 'base64url').toString());
+        const MAX_AGE_MS = 30 * 60 * 1000; // 30 min session validity
+        if (Date.now() - payload.issuedAt > MAX_AGE_MS) return null;
+
+        return payload;
+    } catch {
+        return null;
+    }
+}
+
+export default async function handler(req, res) {
     const origin = req.headers.origin;
     if (ALLOWED_ORIGINS.includes(origin)) {
         res.setHeader('Access-Control-Allow-Origin', origin);
@@ -101,29 +123,7 @@ module.exports = async (req, res) => {
 
         return res.status(200).json({ sessionId, token });
     } catch (err) {
-        console.error('restaurant-captcha error', err);
+        console.error('jollibee-captcha error', err);
         return res.status(500).json({ error: 'Something went wrong, please try again.' });
     }
-};
-
-// Exported so restaurant-chat.js can verify tokens issued here with the
-// same constant-time comparison (fix #10 — no string !== comparison on
-// secret-derived values, which leaks timing information).
-module.exports.verifyToken = function verifyToken(token) {
-    try {
-        const [b64, hmac] = token.split('.');
-        const expected = crypto.createHmac('sha256', SESSION_SECRET).update(b64).digest('base64url');
-
-        const a = Buffer.from(hmac);
-        const b = Buffer.from(expected);
-        if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-
-        const payload = JSON.parse(Buffer.from(b64, 'base64url').toString());
-        const MAX_AGE_MS = 30 * 60 * 1000; // 30 min session validity
-        if (Date.now() - payload.issuedAt > MAX_AGE_MS) return null;
-
-        return payload;
-    } catch {
-        return null;
-    }
-};
+}

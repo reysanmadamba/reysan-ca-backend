@@ -5,11 +5,11 @@
 // tenant_admin can only ever act on their own tenant; a super_admin can
 // act on any tenant.
 
-const { createClient } = require('@supabase/supabase-js');
+import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
-async function verifyAuth(req, requiredTenantSlug) {
+export async function verifyAuth(req, requiredTenantSlug) {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
     if (!token) return { error: 'Missing authorization token', status: 401 };
@@ -35,5 +35,3 @@ async function verifyAuth(req, requiredTenantSlug) {
 
     return { role: 'tenant_admin', tenantId: tenant.id, userId: userData.user.id };
 }
-
-module.exports = { verifyAuth };

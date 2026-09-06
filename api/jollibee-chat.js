@@ -9,9 +9,9 @@
 //   #8  check response.ok and log the error body before parsing content
 //   #9  ban check uses the corrected IP, checked before any LLM call
 
-const crypto = require('crypto');
-const { createClient } = require('@supabase/supabase-js');
-const { verifyToken } = require('./jollibee-captcha');
+import crypto from 'crypto';
+import { createClient } from '@supabase/supabase-js';
+import { verifyToken } from './jollibee-captcha.js';
 
 const TENANT_SLUG = 'jollibee'; // default demo tenant this chat serves
 
@@ -251,7 +251,7 @@ async function confirmOrder({ items, note }, tenantId, customerId, phoneVerified
     return { order_id: data.id, subtotal: data.subtotal, status: data.status };
 }
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
     const origin = req.headers.origin;
     // Fix #2: cosmetic only, not the actual gate
     if (ALLOWED_ORIGINS.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
@@ -344,10 +344,10 @@ module.exports = async (req, res) => {
             phoneVerified: currentPhoneVerified
         });
     } catch (err) {
-        console.error('restaurant-chat error', err);
+        console.error('jollibee-chat error', err);
         return res.status(500).json({ error: 'Something went wrong, please try again.' });
     }
-};
+}
 
 // Fix #4: single atomic DB call, no separate count-then-insert
 async function bumpRateLimit(key, windowSeconds) {

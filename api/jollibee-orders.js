@@ -4,17 +4,23 @@
 // PATCH -> update an order's status/eta; on accept, logs a mock SMS
 //          (no real Twilio wired up yet, this just records what WOULD be sent)
 
-const { createClient } = require('@supabase/supabase-js');
-const { verifyAuth } = require('./auth-check');
+import { createClient } from '@supabase/supabase-js';
+import { verifyAuth } from './auth-check.js';
 
 const TENANT_SLUG = 'jollibee';
 const ALLOWED_ORIGINS = ['https://reysan.ca'];
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
     const origin = req.headers.origin;
     if (ALLOWED_ORIGINS.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
+
+    if (req.method === 'OPTIONS') {
+        res.setHeader('Access-Control-Allow-Methods', 'GET, PATCH, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        return res.status(204).end();
+    }
 
     const auth = await verifyAuth(req, TENANT_SLUG);
     if (auth.error) return res.status(auth.status).json({ error: auth.error });
@@ -68,4 +74,4 @@ module.exports = async (req, res) => {
     }
 
     return res.status(405).json({ error: 'Method not allowed' });
-};
+}
