@@ -75,6 +75,7 @@ async function getTenantDetail(tenantId) {
     return {
         tenant,
         admins,
+        users: (userList?.users || []).map((u) => ({ id: u.id, email: u.email })),
         stats: {
             total_orders: totalOrders || 0,
             orders_last_7_days: ordersLast7d || 0,
@@ -147,6 +148,18 @@ export default async function handler(req, res) {
 
             const user = await findUserByEmail(email);
             if (!user) return res.status(404).json({ error: 'No account found with that email. Create it in Supabase first.' });
+
+            // Safety guard: this form can elevate or create access, but never
+            // silently downgrade an existing super_admin. That has to be a
+            // deliberate action in Supabase directly, not a form mistake.
+            const { data: existing } = await supabaseAdmin
+                .from('tenant_users')
+                .select('role')
+                .eq('user_id', user.id)
+                .maybeSingle();
+            if (existing?.role === 'super_admin' && role !== 'super_admin') {
+                return res.status(400).json({ error: 'This account is a super_admin. Downgrade it directly in Supabase if intended.' });
+            }
 
             const { data, error } = await supabaseAdmin
                 .from('tenant_users')
