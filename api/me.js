@@ -27,4 +27,4 @@ export default async function handler(req, res) {
 
     const { data: tenant } = await supabaseAdmin.from('tenants').select('*').eq('id', auth.tenantId).single();
     return res.status(200).json({ role: 'tenant_admin', tenant });
-}
+} 
