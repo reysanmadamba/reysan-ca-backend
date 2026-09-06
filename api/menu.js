@@ -31,6 +31,7 @@ export default async function handler(req, res) {
             .from('menu_items')
             .select('*')
             .eq('tenant_id', resolved.tenantId)
+            .eq('active', true)
             .order('category')
             .order('name');
         if (error) return res.status(500).json({ error: error.message });
@@ -87,7 +88,13 @@ export default async function handler(req, res) {
         const resolved = resolveTenantId(auth, tenant_id);
         if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
 
-        const { error } = await supabaseAdmin.from('menu_items').delete().eq('id', id).eq('tenant_id', resolved.tenantId);
+        // Soft delete — deactivate rather than erase, so order history that
+        // references this item by id stays intact.
+        const { error } = await supabaseAdmin
+            .from('menu_items')
+            .update({ active: false })
+            .eq('id', id)
+            .eq('tenant_id', resolved.tenantId);
         if (error) return res.status(500).json({ error: error.message });
         return res.status(200).json({ ok: true });
     }
