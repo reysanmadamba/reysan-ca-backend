@@ -57,7 +57,7 @@ Flow you must follow, in order:
 2. Once you have both, call request_otp. This is a DEMO — tell the customer their verification code directly in your reply (it will not be texted). Ask them to enter it back to you.
 3. When they reply with a code, call verify_otp. If it fails, let them try again (max 3 attempts).
 4. Only after verify_otp succeeds may you discuss the menu or take an order. If asked about the menu before verification, politely say you just need to verify their number first.
-5. Use search_menu for any menu question — never invent items, prices, or availability.
+5. Use search_menu for any menu question — never invent items, prices, or availability. If search_menu comes back with no matching results, don't just say it's unavailable and stop there — apologize briefly, then either suggest something similar (search the same category and offer one or two options) or ask if they'd like something else. Never leave the conversation at a dead end.
 6. When they're ready to order, use suggest_items to show a running summary, then confirm_order only after they explicitly say it's correct.
 7. Keep responses short and friendly, like a cashier taking an order — not a scripted bot.
 8. If asked something unrelated to ordering food, politely redirect back to the menu.
@@ -76,7 +76,7 @@ Handling vague or casual quantity language:
 
 If you're genuinely unsure about something (a menu detail search_menu doesn't resolve, a policy question, anything outside what you can look up) — say so plainly and suggest they call the store directly, rather than guessing.
 
-Checking an existing order: if the customer's first message is about checking on an order rather than placing a new one (e.g. "what's the status of my order", "how much longer"), skip the full name/phone/OTP flow — just ask for their phone number and call check_order_status directly. No verification needed for this, it's read-only. If they have more than one open order, mention each one's status and number, but frame it as one running tab rather than two unrelated charges — e.g. "your original order (#8) is $15.72 and accepted; you added a coffee after that (#9, +$2.09), so your total across both comes to $17.81 [use combined_total from the tool result]." If only one order is open, just report it normally.
+Checking an existing order: if the customer's first message is about checking on an order rather than placing a new one (e.g. "what's the status of my order", "how much longer"), skip the full name/phone/OTP flow — just ask for their phone number and call check_order_status directly. No verification needed for this, it's read-only. Each order comes back with a status_message already written for you — use that instead of calculating your own "ready in X minutes," since it already accounts for orders running late. If they have more than one open order, mention each one's status_message and, if there's more than one, the combined_total — frame it as one running tab, not unrelated charges.
 
 Order numbers: every confirmed order gets an order_number in the tool result. Tell the customer this number when you confirm their order ("you're order number 1042") — it's what they'd reference at pickup, not any internal id.
 
@@ -180,7 +180,7 @@ const tools = [
   },
   {
     name: 'check_order_status',
-    description: 'Look up ALL of a customer\'s currently open (not-yet-completed) orders by phone number. Returns an array of orders, and a combined_total when there\'s more than one — present multiple orders as one running tab (base order + additions) using combined_total, not as separate unrelated charges. Read-only — does not require OTP verification.',
+    description: 'Look up ALL of a customer\'s currently open (not-yet-completed) orders by phone number. Each order includes a ready-to-use status_message — relay that (or something very close to it) rather than composing your own timing claim, since it already accounts for whether the order is overdue. Also returns combined_total when there\'s more than one open order. Read-only — does not require OTP verification.',
     input_schema: {
       type: 'object',
       properties: { phone: { type: 'string' } },
@@ -206,8 +206,8 @@ const openaiTools = tools.map((t) => ({
 }));
 
 async function getTenant() {
-  const { data } = await supabase.from('tenants').select('id, ai_provider').eq('slug', TENANT_SLUG).single();
-  return data ? { id: data.id, aiProvider: data.ai_provider || 'claude' } : null;
+  const { data } = await supabase.from('tenants').select('id, ai_provider, contact_phone').eq('slug', TENANT_SLUG).single();
+  return data ? { id: data.id, aiProvider: data.ai_provider || 'claude', contactPhone: data.contact_phone || 'the store' } : null;
 }
 
 async function requestOtp({ name, phone }, tenantId) {
@@ -428,7 +428,7 @@ function computeRemainingMinutes(order) {
   return Math.max(0, Math.round((targetMs - Date.now()) / 60000));
 }
 
-async function checkOrderStatus({ phone }, tenantId) {
+async function checkOrderStatus({ phone }, tenantId, contactPhone) {
   const digits = phone.replace(/\D/g, '');
 
   const { data: customer } = await supabase
@@ -451,13 +451,29 @@ async function checkOrderStatus({ phone }, tenantId) {
 
   if (!orders || orders.length === 0) return { error: 'No open orders found for that phone number.' };
 
-  const mapped = orders.map((order) => ({
-    order_number: order.order_number,
-    status: order.status,
-    eta_minutes: order.eta_minutes,
-    remaining_minutes: computeRemainingMinutes(order),
-    total: order.total
-  }));
+  const mapped = orders.map((order) => {
+    const remaining = computeRemainingMinutes(order);
+    // Compose the actual status line here — don't leave "how much longer"
+    // to the AI's own math, since it's shown a habit of citing the original
+    // eta_minutes instead of the current remaining time.
+    let status_message;
+    if (order.status === 'ready') {
+      status_message = `Order #${order.order_number} is ready for pickup — please come get it! Call ${contactPhone} if you have any questions.`;
+    } else if (order.status === 'accepted' && remaining === 0) {
+      status_message = `Order #${order.order_number} has been ready for a little while now — please come pick it up! Call ${contactPhone} if you have any questions.`;
+    } else if (order.status === 'accepted') {
+      status_message = `Order #${order.order_number} is accepted and should be ready in about ${remaining} more minutes.`;
+    } else {
+      status_message = `Order #${order.order_number} hasn't been accepted by the store yet.`;
+    }
+    return {
+      order_number: order.order_number,
+      status: order.status,
+      remaining_minutes: remaining,
+      total: order.total,
+      status_message
+    };
+  });
 
   const result = { orders: mapped };
   if (mapped.length > 1) {
@@ -569,7 +585,7 @@ export default async function handler(req, res) {
     }
     if (name === 'search_menu') return searchMenu(input, tenantId);
     if (name === 'suggest_items') return { ok: true, items: input.items };
-    if (name === 'check_order_status') return checkOrderStatus(input, tenantId);
+    if (name === 'check_order_status') return checkOrderStatus(input, tenantId, tenant.contactPhone);
     if (name === 'flag_order_for_staff_review') return flagOrderForReview(input, currentOrderId, tenantId);
     if (name === 'confirm_order') {
       const result = await confirmOrder(input, tenantId, currentCustomerId, currentPhoneVerified, currentOrderId);
