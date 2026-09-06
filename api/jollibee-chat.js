@@ -81,7 +81,7 @@ Formatting: this is a plain-text chat window, not a document. Never use markdown
 
 Phone numbers: whenever you write a phone number back to the customer (confirming it, repeating it), format it with dashes in groups (e.g. 587-123-4321), never as one unbroken string of digits.
 
-Editing an order after confirming it: if the customer says they want to add something after you've already called confirm_order once in this conversation, don't start a second order from scratch. Call confirm_order again with the FULL item list — everything from before plus the new addition — not just the new item by itself. The system will recognize this as an update to the same order rather than a new one, as long as the order hasn't already been accepted by the store. If the tool result comes back with new_separate_order: true, the store already started preparing the first order, so this had to become a second, separate order — tell the customer plainly, e.g. "just a heads up, your first order's already being prepared, so this'll come as a separate order."`;
+Editing an order after confirming it: if the customer wants to add something after you've already called confirm_order once in this conversation, call confirm_order again with ONLY the new addition — not the earlier items repeated. The backend either merges it into the existing order (if the store hasn't accepted it yet) or creates a clean new order containing just the addition (if the store already accepted the first one). If the tool result comes back with new_separate_order: true, tell the customer plainly that this is a second, separate order — e.g. "just a heads up, your first order's already being prepared, so I've put this as a separate order, number [X]."`;
 
 const tools = [
     {
@@ -140,7 +140,7 @@ const tools = [
     },
     {
         name: 'confirm_order',
-        description: 'Place or update the order once the customer has explicitly confirmed. Only callable after verify_otp has succeeded. If the customer already confirmed once this conversation and now wants to add something, call this again with the FULL item list (old items + new) — it updates the same order rather than creating a second one, as long as the store has not yet accepted it.',
+        description: 'Confirm the items the customer just agreed to. Only callable after verify_otp has succeeded. Send ONLY what\'s being confirmed in this call — for a first order that\'s everything they want; if they\'re adding to an order you already confirmed earlier in this conversation, send just the new addition, not the earlier items again. The backend handles combining or separating these correctly on its own.',
         input_schema: {
             type: 'object',
             properties: {
@@ -271,39 +271,57 @@ async function searchMenu({ category, keyword, veg_only, max_price }, tenantId) 
 
 const GST_RATE = 0.05; // Alberta: 5% federal GST, no provincial sales tax
 
-async function confirmOrder({ items, note }, tenantId, customerId, phoneVerified, existingOrderId) {
+// `items` here is ALWAYS just what's being newly confirmed in this call —
+// never the full cumulative cart. The backend decides whether that merges
+// into an existing order or becomes a fresh one, so the AI's job stays
+// simple and can't accidentally duplicate items across two tickets.
+async function confirmOrder({ items: newItems, note }, tenantId, customerId, phoneVerified, existingOrderId) {
     if (!phoneVerified) return { error: 'Phone number must be verified before placing an order.' };
-    const subtotal = items.reduce((sum, i) => sum + i.qty * i.price, 0);
-    const tax = subtotal * GST_RATE;
-    const total = subtotal + tax;
 
-    // If this conversation already confirmed an order, update it instead of
-    // creating a duplicate — but only while the store hasn't accepted it yet.
-    // Once accepted, the kitchen may already be preparing it, so a "new" item
-    // request at that point becomes a genuinely separate order, and the AI
-    // needs to say so explicitly rather than let the customer assume it merged.
     let splitBecauseAccepted = false;
+
     if (existingOrderId) {
-        const { data: existing } = await supabase.from('orders').select('status').eq('id', existingOrderId).maybeSingle();
+        const { data: existing } = await supabase.from('orders').select('*').eq('id', existingOrderId).maybeSingle();
+
         if (existing && existing.status === 'new') {
+            // Merge by quantity — same menu item adds to its existing line
+            // instead of appearing twice, matching real order-ticket behavior.
+            const mergedItems = existing.items.map((i) => ({ ...i }));
+            for (const newItem of newItems) {
+                const match = mergedItems.find((i) => i.menu_item_id === newItem.menu_item_id);
+                if (match) match.qty += newItem.qty;
+                else mergedItems.push({ ...newItem });
+            }
+
+            const subtotal = mergedItems.reduce((sum, i) => sum + i.qty * i.price, 0);
+            const tax = subtotal * GST_RATE;
+            const total = subtotal + tax;
+
             const { data, error } = await supabase
                 .from('orders')
-                .update({ items, subtotal: subtotal.toFixed(2), tax: tax.toFixed(2), total: total.toFixed(2), note: note || null })
+                .update({ items: mergedItems, subtotal: subtotal.toFixed(2), tax: tax.toFixed(2), total: total.toFixed(2), note: note || existing.note })
                 .eq('id', existingOrderId)
                 .select()
                 .single();
             if (error) return { error: error.message };
             return { order_id: data.id, order_number: data.order_number, subtotal: data.subtotal, tax: data.tax, total: data.total, status: data.status, updated: true };
         }
+
         if (existing) splitBecauseAccepted = true;
     }
+
+    // First order, or a split because the previous one is already accepted —
+    // either way, newItems is exactly what goes on this ticket, nothing more.
+    const subtotal = newItems.reduce((sum, i) => sum + i.qty * i.price, 0);
+    const tax = subtotal * GST_RATE;
+    const total = subtotal + tax;
 
     const { data, error } = await supabase
         .from('orders')
         .insert({
             tenant_id: tenantId,
             customer_id: customerId,
-            items,
+            items: newItems,
             subtotal: subtotal.toFixed(2),
             tax: tax.toFixed(2),
             total: total.toFixed(2),
@@ -322,7 +340,7 @@ async function confirmOrder({ items, note }, tenantId, customerId, phoneVerified
         status: data.status,
         ...(splitBecauseAccepted && {
             new_separate_order: true,
-            note_for_ai: 'The previous order was already accepted and is being prepared, so this had to be placed as a new, separate order — tell the customer this plainly.'
+            note_for_ai: 'The previous order was already accepted and is being prepared, so this had to be placed as a new, separate order containing ONLY what was just added — tell the customer plainly that this new order/number is just for the addition, separate from the first one already being made.'
         })
     };
 }
