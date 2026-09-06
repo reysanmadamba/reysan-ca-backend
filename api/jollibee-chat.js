@@ -31,6 +31,7 @@ const ALLOWED_ORIGINS = ['https://reysan.ca'];
 const ALLOWED_AREA_CODES = ['587', '780']; // Edmonton — soft flag only, never blocks
 
 const MAX_PER_SESSION_PER_HOUR = 20;
+const MAX_OFF_TOPIC_WARNINGS = 3; // after this many, the conversation ends
 const MAX_PER_IP_PER_HOUR = 40;
 const MAX_GLOBAL_PER_TENANT_PER_HOUR = 500; // fix #3 — the actual spend cap
 const FETCH_TIMEOUT_MS = 10000;
@@ -60,7 +61,7 @@ Flow you must follow, in order:
 5. Use search_menu for any menu question — never invent items, prices, or availability. If search_menu comes back with no matching results, don't just say it's unavailable and stop there — apologize briefly, then either suggest something similar (search the same category and offer one or two options) or ask if they'd like something else. Never leave the conversation at a dead end.
 6. When they're ready to order, use suggest_items to show a running summary, then confirm_order only after they explicitly say it's correct.
 7. Keep responses short and friendly, like a cashier taking an order — not a scripted bot.
-8. If asked something unrelated to ordering food, politely redirect back to the menu.
+8. If asked something unrelated to ordering from this restaurant, politely say you can only help with the menu and orders here, and call flag_off_topic in that same turn. Do this every time it happens, even if you already warned them once — the system tracks the count and ends the conversation automatically after a few, you don't need to count it yourself. If the tool result comes back with limit_reached: true, say a brief, polite goodbye (e.g. "Sorry, I need to wrap up this conversation since it's moved away from ordering — feel free to start a new chat anytime!") and don't continue answering further off-topic questions after that.
 
 Be a good cashier, not a search box. Real cashiers make conversation and suggest things:
 - If the customer seems unsure what to get, ask a light question first — "feeling like chicken today, or something else?" — instead of just listing the whole menu.
@@ -195,6 +196,11 @@ const tools = [
       properties: { request_description: { type: 'string', description: 'Plain description of what the customer wants changed, for staff to read.' } },
       required: ['request_description']
     }
+  },
+  {
+    name: 'flag_off_topic',
+    description: 'Call this every time the customer asks something unrelated to ordering food from this restaurant (general chit-chat, unrelated topics, anything not about the menu/order/store). Call it in the SAME turn as your warning reply. After a few of these in one conversation, the system will end the chat automatically.',
+    input_schema: { type: 'object', properties: {} }
   }
 ];
 
@@ -226,7 +232,7 @@ async function requestOtp({ name, phone }, tenantId) {
     .maybeSingle();
 
   if (customer?.banned) {
-    return { error: 'This phone number is not able to order online right now. Please call the store directly.' };
+    return { error: "There seems to be an issue with this phone number — please call the store directly and they'll sort it out for you." };
   }
 
   if (!customer) {
@@ -510,11 +516,21 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const clientIp = getClientIp(req);
-  const { message, history = [], token, customerId, phoneVerified, orderId } = req.body;
+  const { message, history = [], token, customerId, phoneVerified, orderId, offTopicCount } = req.body;
 
   // verify the Turnstile-issued session token before anything else
   const session = verifyToken(token);
   if (!session) return res.status(401).json({ error: 'Session expired or invalid. Please refresh.' });
+
+  // Conversation already ended for being off-topic too many times — don't
+  // spend a single token on a reply the customer can't act on anyway.
+  if (offTopicCount >= MAX_OFF_TOPIC_WARNINGS) {
+    return res.status(200).json({
+      reply: "This conversation's been closed since it's moved away from ordering — feel free to refresh and start a new one anytime you'd like to order.",
+      conversationEnded: true,
+      offTopicCount
+    });
+  }
 
   const tenant = await getTenant();
   if (!tenant) return res.status(500).json({ error: 'Configuration error.' });
@@ -557,7 +573,7 @@ export default async function handler(req, res) {
 
   const sessionCount = await bumpRateLimit(`${TENANT_SLUG}:session:${session.sessionId}:hour`, 3600);
   if (sessionCount !== null && sessionCount > MAX_PER_SESSION_PER_HOUR) {
-    return res.status(200).json({ reply: "We've hit the limit for this chat session. Please refresh to start a new order." });
+    return res.status(200).json({ reply: "We've hit the limit for this chat session. Please refresh to start a new order.", conversationEnded: true });
   }
 
   const ipCount = await bumpRateLimit(`${TENANT_SLUG}:ip:${clientIp}:hour`, 3600);
@@ -569,6 +585,7 @@ export default async function handler(req, res) {
   let currentCustomerId = customerId || null;
   let currentPhoneVerified = phoneVerified || false;
   let currentOrderId = orderId || null;
+  let currentOffTopicCount = offTopicCount || 0;
 
   // Shared dispatcher — same tool execution regardless of which provider
   // asked for it, so behavior can't drift between the two.
@@ -587,6 +604,10 @@ export default async function handler(req, res) {
     if (name === 'suggest_items') return { ok: true, items: input.items };
     if (name === 'check_order_status') return checkOrderStatus(input, tenantId, tenant.contactPhone);
     if (name === 'flag_order_for_staff_review') return flagOrderForReview(input, currentOrderId, tenantId);
+    if (name === 'flag_off_topic') {
+      currentOffTopicCount += 1;
+      return { count: currentOffTopicCount, limit_reached: currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS };
+    }
     if (name === 'confirm_order') {
       const result = await confirmOrder(input, tenantId, currentCustomerId, currentPhoneVerified, currentOrderId);
       if (result.order_id) currentOrderId = result.order_id;
@@ -620,7 +641,9 @@ export default async function handler(req, res) {
       history: messages, // mutated in place by whichever provider loop ran
       customerId: currentCustomerId,
       phoneVerified: currentPhoneVerified,
-      orderId: currentOrderId
+      orderId: currentOrderId,
+      offTopicCount: currentOffTopicCount,
+      conversationEnded: currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS
     });
   } catch (err) {
     console.error('jollibee-chat error', err);
