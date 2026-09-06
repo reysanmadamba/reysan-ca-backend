@@ -69,7 +69,11 @@ Handling vague or casual quantity language:
 
 If you're genuinely unsure about something (a menu detail search_menu doesn't resolve, a policy question, anything outside what you can look up) — say so plainly and suggest they call the store directly, rather than guessing.
 
-Checking an existing order: if the customer's first message is about checking on an order rather than placing a new one (e.g. "what's the status of my order", "how much longer"), skip the full name/phone/OTP flow — just ask for their phone number and call check_order_status directly. No verification needed for this, it's read-only.
+Checking an existing order: if the customer's first message is about checking on an order rather than placing a new one (e.g. "what's the status of my order", "how much longer"), skip the full name/phone/OTP flow — just ask for their phone number and call check_order_status directly. No verification needed for this, it's read-only. If they have more than one open order, describe EACH one by its order number, status, and time — never merge them into one total or one status unless the customer explicitly asks for a combined total.
+
+Order numbers: every confirmed order gets an order_number in the tool result. Tell the customer this number when you confirm their order ("you're order number 1042") — it's what they'd reference at pickup, not any internal id.
+
+Do not call confirm_order speculatively. Only call it when the customer has given a clear, final "yes" / "that's right" / equivalent to the exact item list you're about to submit. If they're still thinking out loud ("could I maybe add one more?"), respond in plain text and wait for their actual confirmation before calling the tool. If they change their mind before confirming, just acknowledge it in text — don't call any tool.
 
 Payment: if asked how to pay, tell them payment happens in-store at pickup — credit, debit, or cash. Nothing is charged online through this chat.
 
@@ -160,7 +164,7 @@ const tools = [
     },
     {
         name: 'check_order_status',
-        description: 'Look up the status and remaining time of a customer\'s most recent order by phone number. Read-only — does not require OTP verification, since no order details are placed or changed.',
+        description: 'Look up ALL of a customer\'s currently open (not-yet-completed) orders by phone number. A customer may have more than one open order — always report each one separately, never combine or sum them unless the customer explicitly asks for a combined total. Read-only — does not require OTP verification.',
         input_schema: {
             type: 'object',
             properties: { phone: { type: 'string' } },
@@ -186,11 +190,14 @@ async function requestOtp({ name, phone }, tenantId) {
     const areaCode = digits.slice(-10, -7); // last 10 digits, first 3 = area code
     const areaCodeFlag = !ALLOWED_AREA_CODES.includes(areaCode);
 
+    // Match and store by normalized digits only — "587-123-4321" and
+    // "5871234321" must resolve to the same customer, otherwise a ban (or
+    // any history) on one string doesn't catch the other.
     let { data: customer } = await supabase
         .from('customers')
         .select('*')
         .eq('tenant_id', tenantId)
-        .eq('phone', phone)
+        .eq('phone', digits)
         .maybeSingle();
 
     if (customer?.banned) {
@@ -200,7 +207,7 @@ async function requestOtp({ name, phone }, tenantId) {
     if (!customer) {
         const { data: newCustomer, error } = await supabase
             .from('customers')
-            .insert({ tenant_id: tenantId, name, phone, area_code_flag: areaCodeFlag })
+            .insert({ tenant_id: tenantId, name, phone: digits, area_code_flag: areaCodeFlag })
             .select()
             .single();
         if (error) return { error: error.message };
@@ -286,7 +293,7 @@ async function confirmOrder({ items, note }, tenantId, customerId, phoneVerified
                 .select()
                 .single();
             if (error) return { error: error.message };
-            return { order_id: data.id, subtotal: data.subtotal, tax: data.tax, total: data.total, status: data.status, updated: true };
+            return { order_id: data.id, order_number: data.order_number, subtotal: data.subtotal, tax: data.tax, total: data.total, status: data.status, updated: true };
         }
         if (existing) splitBecauseAccepted = true;
     }
@@ -308,6 +315,7 @@ async function confirmOrder({ items, note }, tenantId, customerId, phoneVerified
     if (error) return { error: error.message };
     return {
         order_id: data.id,
+        order_number: data.order_number,
         subtotal: data.subtotal,
         tax: data.tax,
         total: data.total,
@@ -326,28 +334,36 @@ function computeRemainingMinutes(order) {
 }
 
 async function checkOrderStatus({ phone }, tenantId) {
+    const digits = phone.replace(/\D/g, '');
+
     const { data: customer } = await supabase
         .from('customers')
         .select('id')
         .eq('tenant_id', tenantId)
-        .eq('phone', phone)
+        .eq('phone', digits)
         .maybeSingle();
     if (!customer) return { error: "Couldn't find an order for that phone number." };
 
-    const { data: order } = await supabase
+    // Return every order that isn't fully completed yet — a customer can have
+    // more than one open ticket (e.g. added items after the first was already
+    // accepted), and the AI needs to see all of them, not just the latest.
+    const { data: orders } = await supabase
         .from('orders')
         .select('*')
         .eq('customer_id', customer.id)
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-    if (!order) return { error: "Couldn't find an order for that phone number." };
+        .neq('status', 'completed')
+        .order('created_at', { ascending: true });
+
+    if (!orders || orders.length === 0) return { error: 'No open orders found for that phone number.' };
 
     return {
-        status: order.status,
-        eta_minutes: order.eta_minutes,
-        remaining_minutes: computeRemainingMinutes(order),
-        total: order.total
+        orders: orders.map((order) => ({
+            order_number: order.order_number,
+            status: order.status,
+            eta_minutes: order.eta_minutes,
+            remaining_minutes: computeRemainingMinutes(order),
+            total: order.total
+        }))
     };
 }
 

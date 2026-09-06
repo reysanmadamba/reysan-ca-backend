@@ -83,7 +83,7 @@ export default async function handler(req, res) {
         if (error) return res.status(500).json({ error: error.message });
 
         if (status === 'accepted' && eta_minutes) {
-            const message = `Hi ${order.customers.name}, your order has been received! It'll be ready for pickup in about ${eta_minutes} minutes.`;
+            const message = `Hi ${order.customers.name}, your order has been received! It'll be ready for pickup in about ${eta_minutes} minutes. Our crew may call you if we have any questions about your order.`;
             await supabaseAdmin.from('notifications').insert({
                 tenant_id: resolved.tenantId,
                 customer_id: order.customer_id,
