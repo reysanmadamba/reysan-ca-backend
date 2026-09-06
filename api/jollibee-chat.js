@@ -17,9 +17,16 @@ const TENANT_SLUG = 'jollibee'; // default demo tenant this chat serves
 
 // Toggle which LLM provider handles the conversation — same pattern as
 // your other demos, single constant, no other code changes needed.
-const AI_PROVIDER = 'openai'; // 'claude' | 'openai'
+const AI_PROVIDER_DEFAULT = 'claude'; // fallback if a tenant somehow has no ai_provider set
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 const OPENAI_MODEL = 'gpt-4o-mini';
+
+// Per-token cost, verified against each provider's published pricing.
+// Update these if pricing changes — this is what usage tracking bills against.
+const PRICING = {
+  claude: { input: 1 / 1e6, output: 5 / 1e6 },   // Haiku 4.5: $1 / $5 per million tokens
+  openai: { input: 0.15 / 1e6, output: 0.6 / 1e6 } // gpt-4o-mini: $0.15 / $0.60 per million tokens
+};
 const ALLOWED_ORIGINS = ['https://reysan.ca'];
 const ALLOWED_AREA_CODES = ['587', '780']; // Edmonton — soft flag only, never blocks
 
@@ -35,12 +42,12 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 // Fix #1: same corrected extraction as restaurant-captcha.js — last hop of
 // x-forwarded-for is the real client IP; anything before it is spoofable.
 function getClientIp(req) {
-    const xff = req.headers['x-forwarded-for'];
-    if (xff) {
-        const parts = xff.split(',').map((p) => p.trim());
-        return parts[parts.length - 1];
-    }
-    return req.socket.remoteAddress || 'unknown';
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) {
+    const parts = xff.split(',').map((p) => p.trim());
+    return parts[parts.length - 1];
+  }
+  return req.socket.remoteAddress || 'unknown';
 }
 
 const SYSTEM_PROMPT = `You are the ordering assistant for a Jollibee Canada location, part of a demo ordering system.
@@ -84,189 +91,189 @@ Phone numbers: whenever you write a phone number back to the customer (confirmin
 Editing an order after confirming it: if the customer wants to add something after you've already called confirm_order once in this conversation, call confirm_order again with ONLY the new addition — not the earlier items repeated. The backend either merges it into the existing order (if the store hasn't accepted it yet) or creates a clean new order containing just the addition (if the store already accepted the first one). If the tool result comes back with new_separate_order: true, tell the customer plainly that this is a second, separate order — e.g. "just a heads up, your first order's already being prepared, so I've put this as a separate order, number [X]."`;
 
 const tools = [
-    {
-        name: 'request_otp',
-        description: 'Register the customer and issue a one-time verification code.',
-        input_schema: {
-            type: 'object',
-            properties: { name: { type: 'string' }, phone: { type: 'string' } },
-            required: ['name', 'phone']
-        }
-    },
-    {
-        name: 'verify_otp',
-        description: 'Check the code the customer provided against the one just issued.',
-        input_schema: {
-            type: 'object',
-            properties: { code: { type: 'string' } },
-            required: ['code']
-        }
-    },
-    {
-        name: 'search_menu',
-        description: 'Search the menu by category, keyword, or dietary filter.',
-        input_schema: {
-            type: 'object',
-            properties: {
-                category: { type: 'string' },
-                keyword: { type: 'string' },
-                veg_only: { type: 'boolean' },
-                max_price: { type: 'number' }
-            }
-        }
-    },
-    {
-        name: 'suggest_items',
-        description: 'Show the customer a running order summary before confirming.',
-        input_schema: {
-            type: 'object',
-            properties: {
-                items: {
-                    type: 'array',
-                    items: {
-                        type: 'object',
-                        properties: {
-                            menu_item_id: { type: 'string' },
-                            name: { type: 'string' },
-                            qty: { type: 'number' },
-                            price: { type: 'number' }
-                        },
-                        required: ['menu_item_id', 'name', 'qty', 'price']
-                    }
-                }
-            },
-            required: ['items']
-        }
-    },
-    {
-        name: 'confirm_order',
-        description: 'Confirm the items the customer just agreed to. Only callable after verify_otp has succeeded. Send ONLY what\'s being confirmed in this call — for a first order that\'s everything they want; if they\'re adding to an order you already confirmed earlier in this conversation, send just the new addition, not the earlier items again. The backend handles combining or separating these correctly on its own.',
-        input_schema: {
-            type: 'object',
-            properties: {
-                items: {
-                    type: 'array',
-                    items: {
-                        type: 'object',
-                        properties: {
-                            menu_item_id: { type: 'string' },
-                            name: { type: 'string' },
-                            qty: { type: 'number' },
-                            price: { type: 'number' }
-                        },
-                        required: ['menu_item_id', 'name', 'qty', 'price']
-                    }
-                },
-                note: { type: 'string' }
-            },
-            required: ['items']
-        }
-    },
-    {
-        name: 'check_order_status',
-        description: 'Look up ALL of a customer\'s currently open (not-yet-completed) orders by phone number. Returns an array of orders, and a combined_total when there\'s more than one — present multiple orders as one running tab (base order + additions) using combined_total, not as separate unrelated charges. Read-only — does not require OTP verification.',
-        input_schema: {
-            type: 'object',
-            properties: { phone: { type: 'string' } },
-            required: ['phone']
-        }
+  {
+    name: 'request_otp',
+    description: 'Register the customer and issue a one-time verification code.',
+    input_schema: {
+      type: 'object',
+      properties: { name: { type: 'string' }, phone: { type: 'string' } },
+      required: ['name', 'phone']
     }
+  },
+  {
+    name: 'verify_otp',
+    description: 'Check the code the customer provided against the one just issued.',
+    input_schema: {
+      type: 'object',
+      properties: { code: { type: 'string' } },
+      required: ['code']
+    }
+  },
+  {
+    name: 'search_menu',
+    description: 'Search the menu by category, keyword, or dietary filter.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        category: { type: 'string' },
+        keyword: { type: 'string' },
+        veg_only: { type: 'boolean' },
+        max_price: { type: 'number' }
+      }
+    }
+  },
+  {
+    name: 'suggest_items',
+    description: 'Show the customer a running order summary before confirming.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              menu_item_id: { type: 'string' },
+              name: { type: 'string' },
+              qty: { type: 'number' },
+              price: { type: 'number' }
+            },
+            required: ['menu_item_id', 'name', 'qty', 'price']
+          }
+        }
+      },
+      required: ['items']
+    }
+  },
+  {
+    name: 'confirm_order',
+    description: 'Confirm the items the customer just agreed to. Only callable after verify_otp has succeeded. Send ONLY what\'s being confirmed in this call — for a first order that\'s everything they want; if they\'re adding to an order you already confirmed earlier in this conversation, send just the new addition, not the earlier items again. The backend handles combining or separating these correctly on its own.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              menu_item_id: { type: 'string' },
+              name: { type: 'string' },
+              qty: { type: 'number' },
+              price: { type: 'number' }
+            },
+            required: ['menu_item_id', 'name', 'qty', 'price']
+          }
+        },
+        note: { type: 'string' }
+      },
+      required: ['items']
+    }
+  },
+  {
+    name: 'check_order_status',
+    description: 'Look up ALL of a customer\'s currently open (not-yet-completed) orders by phone number. Returns an array of orders, and a combined_total when there\'s more than one — present multiple orders as one running tab (base order + additions) using combined_total, not as separate unrelated charges. Read-only — does not require OTP verification.',
+    input_schema: {
+      type: 'object',
+      properties: { phone: { type: 'string' } },
+      required: ['phone']
+    }
+  }
 ];
 
 // OpenAI expects tools wrapped in { type: 'function', function: {...} } —
 // same definitions, just reshaped, so the two schemas can't drift apart.
 const openaiTools = tools.map((t) => ({
-    type: 'function',
-    function: { name: t.name, description: t.description, parameters: t.input_schema }
+  type: 'function',
+  function: { name: t.name, description: t.description, parameters: t.input_schema }
 }));
 
 async function getTenant() {
-    const { data } = await supabase.from('tenants').select('id').eq('slug', TENANT_SLUG).single();
-    return data?.id;
+  const { data } = await supabase.from('tenants').select('id, ai_provider').eq('slug', TENANT_SLUG).single();
+  return data ? { id: data.id, aiProvider: data.ai_provider || 'claude' } : null;
 }
 
 async function requestOtp({ name, phone }, tenantId) {
-    const digits = phone.replace(/\D/g, '');
-    const areaCode = digits.slice(-10, -7); // last 10 digits, first 3 = area code
-    const areaCodeFlag = !ALLOWED_AREA_CODES.includes(areaCode);
+  const digits = phone.replace(/\D/g, '');
+  const areaCode = digits.slice(-10, -7); // last 10 digits, first 3 = area code
+  const areaCodeFlag = !ALLOWED_AREA_CODES.includes(areaCode);
 
-    // Match and store by normalized digits only — "587-123-4321" and
-    // "5871234321" must resolve to the same customer, otherwise a ban (or
-    // any history) on one string doesn't catch the other.
-    let { data: customer } = await supabase
-        .from('customers')
-        .select('*')
-        .eq('tenant_id', tenantId)
-        .eq('phone', digits)
-        .maybeSingle();
+  // Match and store by normalized digits only — "587-123-4321" and
+  // "5871234321" must resolve to the same customer, otherwise a ban (or
+  // any history) on one string doesn't catch the other.
+  let { data: customer } = await supabase
+    .from('customers')
+    .select('*')
+    .eq('tenant_id', tenantId)
+    .eq('phone', digits)
+    .maybeSingle();
 
-    if (customer?.banned) {
-        return { error: 'This phone number is not able to order online right now. Please call the store directly.' };
-    }
+  if (customer?.banned) {
+    return { error: 'This phone number is not able to order online right now. Please call the store directly.' };
+  }
 
-    if (!customer) {
-        const { data: newCustomer, error } = await supabase
-            .from('customers')
-            .insert({ tenant_id: tenantId, name, phone: digits, area_code_flag: areaCodeFlag })
-            .select()
-            .single();
-        if (error) return { error: error.message };
-        customer = newCustomer;
-    }
+  if (!customer) {
+    const { data: newCustomer, error } = await supabase
+      .from('customers')
+      .insert({ tenant_id: tenantId, name, phone: digits, area_code_flag: areaCodeFlag })
+      .select()
+      .single();
+    if (error) return { error: error.message };
+    customer = newCustomer;
+  }
 
-    const code = String(Math.floor(100000 + Math.random() * 900000));
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
 
-    const { error: otpError } = await supabase
-        .from('otp_verifications')
-        .insert({ customer_id: customer.id, code, expires_at: expiresAt });
-    if (otpError) return { error: otpError.message };
+  const { error: otpError } = await supabase
+    .from('otp_verifications')
+    .insert({ customer_id: customer.id, code, expires_at: expiresAt });
+  if (otpError) return { error: otpError.message };
 
-    return { customer_id: customer.id, demo_code: code, note: 'DEMO ONLY — real deployment would text this instead' };
+  return { customer_id: customer.id, demo_code: code, note: 'DEMO ONLY — real deployment would text this instead' };
 }
 
 async function verifyOtp({ code }, customerId) {
-    if (!customerId) return { error: 'No pending verification for this session.' };
+  if (!customerId) return { error: 'No pending verification for this session.' };
 
-    const { data: otp } = await supabase
-        .from('otp_verifications')
-        .select('*')
-        .eq('customer_id', customerId)
-        .is('verified_at', null)
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+  const { data: otp } = await supabase
+    .from('otp_verifications')
+    .select('*')
+    .eq('customer_id', customerId)
+    .is('verified_at', null)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-    if (!otp) return { error: 'No pending code found. Please request a new one.' };
-    if (new Date(otp.expires_at) < new Date()) return { error: 'Code expired. Please request a new one.' };
-    if (otp.attempts >= 3) return { error: 'Too many attempts. Please request a new code.' };
+  if (!otp) return { error: 'No pending code found. Please request a new one.' };
+  if (new Date(otp.expires_at) < new Date()) return { error: 'Code expired. Please request a new one.' };
+  if (otp.attempts >= 3) return { error: 'Too many attempts. Please request a new code.' };
 
-    if (otp.code !== code) {
-        await supabase.from('otp_verifications').update({ attempts: otp.attempts + 1 }).eq('id', otp.id);
-        return { verified: false, error: 'Incorrect code.' };
-    }
+  if (otp.code !== code) {
+    await supabase.from('otp_verifications').update({ attempts: otp.attempts + 1 }).eq('id', otp.id);
+    return { verified: false, error: 'Incorrect code.' };
+  }
 
-    await supabase.from('otp_verifications').update({ verified_at: new Date().toISOString() }).eq('id', otp.id);
-    await supabase.from('customers').update({ phone_verified: true }).eq('id', customerId);
+  await supabase.from('otp_verifications').update({ verified_at: new Date().toISOString() }).eq('id', otp.id);
+  await supabase.from('customers').update({ phone_verified: true }).eq('id', customerId);
 
-    return { verified: true };
+  return { verified: true };
 }
 
 async function searchMenu({ category, keyword, veg_only, max_price }, tenantId) {
-    let query = supabase.from('menu_items').select('*').eq('tenant_id', tenantId).eq('active', true);
-    if (category) query = query.ilike('category', category);
-    if (veg_only) query = query.eq('veg', true);
-    if (max_price) query = query.lte('price', max_price);
-    const { data, error } = await query;
-    if (error) return { error: error.message };
-    let results = data || [];
-    if (keyword) {
-        const k = keyword.toLowerCase();
-        results = results.filter(
-            (i) => i.name.toLowerCase().includes(k) || (i.description || '').toLowerCase().includes(k)
-        );
-    }
-    return { results };
+  let query = supabase.from('menu_items').select('*').eq('tenant_id', tenantId).eq('active', true);
+  if (category) query = query.ilike('category', category);
+  if (veg_only) query = query.eq('veg', true);
+  if (max_price) query = query.lte('price', max_price);
+  const { data, error } = await query;
+  if (error) return { error: error.message };
+  let results = data || [];
+  if (keyword) {
+    const k = keyword.toLowerCase();
+    results = results.filter(
+      (i) => i.name.toLowerCase().includes(k) || (i.description || '').toLowerCase().includes(k)
+    );
+  }
+  return { results };
 }
 
 const GST_RATE = 0.05; // Alberta: 5% federal GST, no provincial sales tax
@@ -276,363 +283,384 @@ const GST_RATE = 0.05; // Alberta: 5% federal GST, no provincial sales tax
 // into an existing order or becomes a fresh one, so the AI's job stays
 // simple and can't accidentally duplicate items across two tickets.
 async function confirmOrder({ items: newItems, note }, tenantId, customerId, phoneVerified, existingOrderId) {
-    if (!phoneVerified) return { error: 'Phone number must be verified before placing an order.' };
+  if (!phoneVerified) return { error: 'Phone number must be verified before placing an order.' };
 
-    let splitBecauseAccepted = false;
-    let previousOrderTotal = 0;
+  let splitBecauseAccepted = false;
+  let previousOrderTotal = 0;
 
-    if (existingOrderId) {
-        const { data: existing } = await supabase.from('orders').select('*').eq('id', existingOrderId).maybeSingle();
+  if (existingOrderId) {
+    const { data: existing } = await supabase.from('orders').select('*').eq('id', existingOrderId).maybeSingle();
 
-        if (existing && existing.status === 'new') {
-            // Merge by quantity — same menu item adds to its existing line
-            // instead of appearing twice, matching real order-ticket behavior.
-            const mergedItems = existing.items.map((i) => ({ ...i }));
-            for (const newItem of newItems) {
-                const match = mergedItems.find((i) => i.menu_item_id === newItem.menu_item_id);
-                if (match) match.qty += newItem.qty;
-                else mergedItems.push({ ...newItem });
-            }
+    if (existing && existing.status === 'new') {
+      // Merge by quantity — same menu item adds to its existing line
+      // instead of appearing twice, matching real order-ticket behavior.
+      const mergedItems = existing.items.map((i) => ({ ...i }));
+      for (const newItem of newItems) {
+        const match = mergedItems.find((i) => i.menu_item_id === newItem.menu_item_id);
+        if (match) match.qty += newItem.qty;
+        else mergedItems.push({ ...newItem });
+      }
 
-            const subtotal = mergedItems.reduce((sum, i) => sum + i.qty * i.price, 0);
-            const tax = subtotal * GST_RATE;
-            const total = subtotal + tax;
+      const subtotal = mergedItems.reduce((sum, i) => sum + i.qty * i.price, 0);
+      const tax = subtotal * GST_RATE;
+      const total = subtotal + tax;
 
-            const { data, error } = await supabase
-                .from('orders')
-                .update({ items: mergedItems, subtotal: subtotal.toFixed(2), tax: tax.toFixed(2), total: total.toFixed(2), note: note || existing.note })
-                .eq('id', existingOrderId)
-                .select()
-                .single();
-            if (error) return { error: error.message };
-            return { order_id: data.id, order_number: data.order_number, subtotal: data.subtotal, tax: data.tax, total: data.total, status: data.status, updated: true };
-        }
-
-        if (existing) {
-            splitBecauseAccepted = true;
-            previousOrderTotal = Number(existing.total || 0);
-        }
-    }
-
-    // First order, or a split because the previous one is already accepted —
-    // either way, newItems is exactly what goes on this ticket, nothing more.
-    const subtotal = newItems.reduce((sum, i) => sum + i.qty * i.price, 0);
-    const tax = subtotal * GST_RATE;
-    const total = subtotal + tax;
-
-    const { data, error } = await supabase
+      const { data, error } = await supabase
         .from('orders')
-        .insert({
-            tenant_id: tenantId,
-            customer_id: customerId,
-            items: newItems,
-            subtotal: subtotal.toFixed(2),
-            tax: tax.toFixed(2),
-            total: total.toFixed(2),
-            note: note || null,
-            status: 'new'
-        })
+        .update({ items: mergedItems, subtotal: subtotal.toFixed(2), tax: tax.toFixed(2), total: total.toFixed(2), note: note || existing.note })
+        .eq('id', existingOrderId)
         .select()
         .single();
-    if (error) return { error: error.message };
-    return {
-        order_id: data.id,
-        order_number: data.order_number,
-        subtotal: data.subtotal,
-        tax: data.tax,
-        total: data.total,
-        status: data.status,
-        ...(splitBecauseAccepted && {
-            new_separate_order: true,
-            combined_total: (previousOrderTotal + total).toFixed(2),
-            note_for_ai: 'The previous order was already accepted and is being prepared, so this had to be placed as a new, separate order containing ONLY what was just added. Tell the customer this as one running tab, not two unrelated charges — e.g. "your original order is being prepared, and I\'ve added this as order #[X] for just the new item(s), so your total across both comes to $[combined_total from this result — use it exactly, don\'t add the numbers yourself]."'
-        })
-    };
+      if (error) return { error: error.message };
+      return { order_id: data.id, order_number: data.order_number, subtotal: data.subtotal, tax: data.tax, total: data.total, status: data.status, updated: true };
+    }
+
+    if (existing) {
+      splitBecauseAccepted = true;
+      previousOrderTotal = Number(existing.total || 0);
+    }
+  }
+
+  // First order, or a split because the previous one is already accepted —
+  // either way, newItems is exactly what goes on this ticket, nothing more.
+  const subtotal = newItems.reduce((sum, i) => sum + i.qty * i.price, 0);
+  const tax = subtotal * GST_RATE;
+  const total = subtotal + tax;
+
+  const { data, error } = await supabase
+    .from('orders')
+    .insert({
+      tenant_id: tenantId,
+      customer_id: customerId,
+      items: newItems,
+      subtotal: subtotal.toFixed(2),
+      tax: tax.toFixed(2),
+      total: total.toFixed(2),
+      note: note || null,
+      status: 'new'
+    })
+    .select()
+    .single();
+  if (error) return { error: error.message };
+  return {
+    order_id: data.id,
+    order_number: data.order_number,
+    subtotal: data.subtotal,
+    tax: data.tax,
+    total: data.total,
+    status: data.status,
+    ...(splitBecauseAccepted && {
+      new_separate_order: true,
+      combined_total: (previousOrderTotal + total).toFixed(2),
+      note_for_ai: 'The previous order was already accepted and is being prepared, so this had to be placed as a new, separate order containing ONLY what was just added. Tell the customer this as one running tab, not two unrelated charges — e.g. "your original order is being prepared, and I\'ve added this as order #[X] for just the new item(s), so your total across both comes to $[combined_total from this result — use it exactly, don\'t add the numbers yourself]."'
+    })
+  };
 }
 
 function computeRemainingMinutes(order) {
-    if (order.status !== 'accepted' || !order.accepted_at || !order.eta_minutes) return null;
-    const targetMs = new Date(order.accepted_at).getTime() + order.eta_minutes * 60000;
-    return Math.max(0, Math.round((targetMs - Date.now()) / 60000));
+  if (order.status !== 'accepted' || !order.accepted_at || !order.eta_minutes) return null;
+  const targetMs = new Date(order.accepted_at).getTime() + order.eta_minutes * 60000;
+  return Math.max(0, Math.round((targetMs - Date.now()) / 60000));
 }
 
 async function checkOrderStatus({ phone }, tenantId) {
-    const digits = phone.replace(/\D/g, '');
+  const digits = phone.replace(/\D/g, '');
 
-    const { data: customer } = await supabase
-        .from('customers')
-        .select('id')
-        .eq('tenant_id', tenantId)
-        .eq('phone', digits)
-        .maybeSingle();
-    if (!customer) return { error: "Couldn't find an order for that phone number." };
+  const { data: customer } = await supabase
+    .from('customers')
+    .select('id')
+    .eq('tenant_id', tenantId)
+    .eq('phone', digits)
+    .maybeSingle();
+  if (!customer) return { error: "Couldn't find an order for that phone number." };
 
-    // Return every order that isn't fully completed yet — a customer can have
-    // more than one open ticket (e.g. added items after the first was already
-    // accepted), and the AI needs to see all of them, not just the latest.
-    const { data: orders } = await supabase
-        .from('orders')
-        .select('*')
-        .eq('customer_id', customer.id)
-        .neq('status', 'completed')
-        .order('created_at', { ascending: true });
+  // Return every order that isn't fully completed yet — a customer can have
+  // more than one open ticket (e.g. added items after the first was already
+  // accepted), and the AI needs to see all of them, not just the latest.
+  const { data: orders } = await supabase
+    .from('orders')
+    .select('*')
+    .eq('customer_id', customer.id)
+    .neq('status', 'completed')
+    .order('created_at', { ascending: true });
 
-    if (!orders || orders.length === 0) return { error: 'No open orders found for that phone number.' };
+  if (!orders || orders.length === 0) return { error: 'No open orders found for that phone number.' };
 
-    const mapped = orders.map((order) => ({
-        order_number: order.order_number,
-        status: order.status,
-        eta_minutes: order.eta_minutes,
-        remaining_minutes: computeRemainingMinutes(order),
-        total: order.total
-    }));
+  const mapped = orders.map((order) => ({
+    order_number: order.order_number,
+    status: order.status,
+    eta_minutes: order.eta_minutes,
+    remaining_minutes: computeRemainingMinutes(order),
+    total: order.total
+  }));
 
-    const result = { orders: mapped };
-    if (mapped.length > 1) {
-        result.combined_total = mapped.reduce((sum, o) => sum + Number(o.total), 0).toFixed(2);
-    }
-    return result;
+  const result = { orders: mapped };
+  if (mapped.length > 1) {
+    result.combined_total = mapped.reduce((sum, o) => sum + Number(o.total), 0).toFixed(2);
+  }
+  return result;
 }
 
 export default async function handler(req, res) {
-    const origin = req.headers.origin;
-    // Fix #2: cosmetic only, not the actual gate
-    if (ALLOWED_ORIGINS.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
+  const origin = req.headers.origin;
+  // Fix #2: cosmetic only, not the actual gate
+  if (ALLOWED_ORIGINS.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
 
-    if (req.method === 'OPTIONS') {
-        res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-        return res.status(204).end();
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    return res.status(204).end();
+  }
+
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+  const clientIp = getClientIp(req);
+  const { message, history = [], token, customerId, phoneVerified, orderId } = req.body;
+
+  // verify the Turnstile-issued session token before anything else
+  const session = verifyToken(token);
+  if (!session) return res.status(401).json({ error: 'Session expired or invalid. Please refresh.' });
+
+  const tenant = await getTenant();
+  if (!tenant) return res.status(500).json({ error: 'Configuration error.' });
+  const tenantId = tenant.id;
+  const activeProvider = tenant.aiProvider; // per-tenant switch, no redeploy needed to change it
+
+  // Lightweight polling path — the widget calls this every ~15s while
+  // waiting on an order. No LLM call, no rate-limit cost: just a read.
+  if (req.body.checkStatus && orderId) {
+    const { data: order } = await supabase
+      .from('orders')
+      .select('status, eta_minutes, accepted_at')
+      .eq('id', orderId)
+      .eq('tenant_id', tenantId)
+      .maybeSingle();
+    if (!order) return res.status(404).json({ error: 'Order not found.' });
+    return res.status(200).json({
+      status: order.status,
+      eta_minutes: order.eta_minutes,
+      remaining_minutes: computeRemainingMinutes(order)
+    });
+  }
+
+  // Fix #9: ban check uses the corrected IP from fix #1
+  const { data: ban } = await supabase
+    .from('banned_ips')
+    .select('*')
+    .eq('ip', clientIp)
+    .gte('banned_until', new Date().toISOString())
+    .maybeSingle();
+  if (ban) return res.status(403).json({ error: 'Access temporarily restricted.' });
+
+  // Fix #3 + #4: check the GLOBAL tenant cap first, atomically, before any
+  // per-session/per-IP check — this is the actual spend-control gate.
+  const globalCount = await bumpRateLimit(`${TENANT_SLUG}:global:hour`, 3600);
+  if (globalCount === null) return res.status(500).json({ error: 'Something went wrong.' });
+  if (globalCount > MAX_GLOBAL_PER_TENANT_PER_HOUR) {
+    return res.status(429).json({ error: 'This demo is experiencing high traffic. Please try again later.' });
+  }
+
+  const sessionCount = await bumpRateLimit(`${TENANT_SLUG}:session:${session.sessionId}:hour`, 3600);
+  if (sessionCount !== null && sessionCount > MAX_PER_SESSION_PER_HOUR) {
+    return res.status(200).json({ reply: "We've hit the limit for this chat session. Please refresh to start a new order." });
+  }
+
+  const ipCount = await bumpRateLimit(`${TENANT_SLUG}:ip:${clientIp}:hour`, 3600);
+  if (ipCount !== null && ipCount > MAX_PER_IP_PER_HOUR) {
+    return res.status(429).json({ error: 'Too many requests. Please try again later.' });
+  }
+
+  const messages = [...history, { role: 'user', content: message }];
+  let currentCustomerId = customerId || null;
+  let currentPhoneVerified = phoneVerified || false;
+  let currentOrderId = orderId || null;
+
+  // Shared dispatcher — same tool execution regardless of which provider
+  // asked for it, so behavior can't drift between the two.
+  async function runTool(name, input) {
+    if (name === 'request_otp') {
+      const result = await requestOtp(input, tenantId);
+      if (result.customer_id) currentCustomerId = result.customer_id;
+      return result;
     }
-
-    if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-
-    const clientIp = getClientIp(req);
-    const { message, history = [], token, customerId, phoneVerified, orderId } = req.body;
-
-    // verify the Turnstile-issued session token before anything else
-    const session = verifyToken(token);
-    if (!session) return res.status(401).json({ error: 'Session expired or invalid. Please refresh.' });
-
-    const tenantId = await getTenant();
-    if (!tenantId) return res.status(500).json({ error: 'Configuration error.' });
-
-    // Lightweight polling path — the widget calls this every ~15s while
-    // waiting on an order. No LLM call, no rate-limit cost: just a read.
-    if (req.body.checkStatus && orderId) {
-        const { data: order } = await supabase
-            .from('orders')
-            .select('status, eta_minutes, accepted_at')
-            .eq('id', orderId)
-            .eq('tenant_id', tenantId)
-            .maybeSingle();
-        if (!order) return res.status(404).json({ error: 'Order not found.' });
-        return res.status(200).json({
-            status: order.status,
-            eta_minutes: order.eta_minutes,
-            remaining_minutes: computeRemainingMinutes(order)
-        });
+    if (name === 'verify_otp') {
+      const result = await verifyOtp(input, currentCustomerId);
+      if (result.verified) currentPhoneVerified = true;
+      return result;
     }
-
-    // Fix #9: ban check uses the corrected IP from fix #1
-    const { data: ban } = await supabase
-        .from('banned_ips')
-        .select('*')
-        .eq('ip', clientIp)
-        .gte('banned_until', new Date().toISOString())
-        .maybeSingle();
-    if (ban) return res.status(403).json({ error: 'Access temporarily restricted.' });
-
-    // Fix #3 + #4: check the GLOBAL tenant cap first, atomically, before any
-    // per-session/per-IP check — this is the actual spend-control gate.
-    const globalCount = await bumpRateLimit(`${TENANT_SLUG}:global:hour`, 3600);
-    if (globalCount === null) return res.status(500).json({ error: 'Something went wrong.' });
-    if (globalCount > MAX_GLOBAL_PER_TENANT_PER_HOUR) {
-        return res.status(429).json({ error: 'This demo is experiencing high traffic. Please try again later.' });
+    if (name === 'search_menu') return searchMenu(input, tenantId);
+    if (name === 'suggest_items') return { ok: true, items: input.items };
+    if (name === 'check_order_status') return checkOrderStatus(input, tenantId);
+    if (name === 'confirm_order') {
+      const result = await confirmOrder(input, tenantId, currentCustomerId, currentPhoneVerified, currentOrderId);
+      if (result.order_id) currentOrderId = result.order_id;
+      return result;
     }
+    return { error: 'Unknown tool' };
+  }
 
-    const sessionCount = await bumpRateLimit(`${TENANT_SLUG}:session:${session.sessionId}:hour`, 3600);
-    if (sessionCount !== null && sessionCount > MAX_PER_SESSION_PER_HOUR) {
-        return res.status(200).json({ reply: "We've hit the limit for this chat session. Please refresh to start a new order." });
-    }
+  try {
+    const { text: replyText, inputTokens, outputTokens } =
+      activeProvider === 'openai' ? await runOpenAiLoop(messages, runTool) : await runClaudeLoop(messages, runTool);
 
-    const ipCount = await bumpRateLimit(`${TENANT_SLUG}:ip:${clientIp}:hour`, 3600);
-    if (ipCount !== null && ipCount > MAX_PER_IP_PER_HOUR) {
-        return res.status(429).json({ error: 'Too many requests. Please try again later.' });
-    }
+    const pricing = PRICING[activeProvider] || PRICING[AI_PROVIDER_DEFAULT];
+    const costUsd = inputTokens * pricing.input + outputTokens * pricing.output;
 
-    const messages = [...history, { role: 'user', content: message }];
-    let currentCustomerId = customerId || null;
-    let currentPhoneVerified = phoneVerified || false;
-    let currentOrderId = orderId || null;
+    await supabase.from('chat_logs').insert({
+      tenant_id: tenantId,
+      source: TENANT_SLUG,
+      session_id: session.sessionId,
+      question: message,
+      answer: replyText,
+      ip: clientIp,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      cost_usd: costUsd,
+      model: activeProvider === 'openai' ? OPENAI_MODEL : CLAUDE_MODEL
+    });
 
-    // Shared dispatcher — same tool execution regardless of which provider
-    // asked for it, so behavior can't drift between the two.
-    async function runTool(name, input) {
-        if (name === 'request_otp') {
-            const result = await requestOtp(input, tenantId);
-            if (result.customer_id) currentCustomerId = result.customer_id;
-            return result;
-        }
-        if (name === 'verify_otp') {
-            const result = await verifyOtp(input, currentCustomerId);
-            if (result.verified) currentPhoneVerified = true;
-            return result;
-        }
-        if (name === 'search_menu') return searchMenu(input, tenantId);
-        if (name === 'suggest_items') return { ok: true, items: input.items };
-        if (name === 'check_order_status') return checkOrderStatus(input, tenantId);
-        if (name === 'confirm_order') {
-            const result = await confirmOrder(input, tenantId, currentCustomerId, currentPhoneVerified, currentOrderId);
-            if (result.order_id) currentOrderId = result.order_id;
-            return result;
-        }
-        return { error: 'Unknown tool' };
-    }
-
-    try {
-        const replyText =
-            AI_PROVIDER === 'openai' ? await runOpenAiLoop(messages, runTool) : await runClaudeLoop(messages, runTool);
-
-        await supabase.from('chat_logs').insert({
-            tenant_id: tenantId,
-            source: TENANT_SLUG,
-            session_id: session.sessionId,
-            question: message,
-            answer: replyText,
-            ip: clientIp
-        });
-
-        return res.status(200).json({
-            reply: replyText,
-            history: messages, // mutated in place by whichever provider loop ran
-            customerId: currentCustomerId,
-            phoneVerified: currentPhoneVerified,
-            orderId: currentOrderId
-        });
-    } catch (err) {
-        console.error('jollibee-chat error', err);
-        return res.status(500).json({ error: 'Something went wrong, please try again.' });
-    }
+    return res.status(200).json({
+      reply: replyText,
+      history: messages, // mutated in place by whichever provider loop ran
+      customerId: currentCustomerId,
+      phoneVerified: currentPhoneVerified,
+      orderId: currentOrderId
+    });
+  } catch (err) {
+    console.error('jollibee-chat error', err);
+    return res.status(500).json({ error: 'Something went wrong, please try again.' });
+  }
 }
 
 // Fix #4: single atomic DB call, no separate count-then-insert
 async function bumpRateLimit(key, windowSeconds) {
-    const { data, error } = await supabase.rpc('increment_rate_limit', { p_key: key, p_window_seconds: windowSeconds });
-    if (error) {
-        console.error('rate limit error', error);
-        return null;
-    }
-    return data;
+  const { data, error } = await supabase.rpc('increment_rate_limit', { p_key: key, p_window_seconds: windowSeconds });
+  if (error) {
+    console.error('rate limit error', error);
+    return null;
+  }
+  return data;
 }
 
 // Claude loop — mutates `messages` in place (Anthropic's native block format)
-// so the caller can persist it as history for the next request.
+// so the caller can persist it as history for the next request. Also
+// accumulates usage across every API call in the loop (a single user
+// message can trigger several round trips if tools are chained).
 async function runClaudeLoop(messages, runTool) {
-    let response = await callClaude(messages);
+  let response = await callClaude(messages);
+  let inputTokens = response.usage?.input_tokens || 0;
+  let outputTokens = response.usage?.output_tokens || 0;
 
-    while (response.stop_reason === 'tool_use') {
-        const toolUseBlocks = response.content.filter((b) => b.type === 'tool_use');
-        const toolResultBlocks = [];
+  while (response.stop_reason === 'tool_use') {
+    const toolUseBlocks = response.content.filter((b) => b.type === 'tool_use');
+    const toolResultBlocks = [];
 
-        for (const block of toolUseBlocks) {
-            const result = await runTool(block.name, block.input);
-            toolResultBlocks.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(result) });
-        }
-
-        messages.push({ role: 'assistant', content: response.content });
-        messages.push({ role: 'user', content: toolResultBlocks });
-        response = await callClaude(messages);
+    for (const block of toolUseBlocks) {
+      const result = await runTool(block.name, block.input);
+      toolResultBlocks.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(result) });
     }
 
     messages.push({ role: 'assistant', content: response.content });
-    const textBlock = response.content.find((b) => b.type === 'text');
-    return textBlock ? textBlock.text : '';
+    messages.push({ role: 'user', content: toolResultBlocks });
+    response = await callClaude(messages);
+    inputTokens += response.usage?.input_tokens || 0;
+    outputTokens += response.usage?.output_tokens || 0;
+  }
+
+  messages.push({ role: 'assistant', content: response.content });
+  const textBlock = response.content.find((b) => b.type === 'text');
+  return { text: textBlock ? textBlock.text : '', inputTokens, outputTokens };
 }
 
 // OpenAI loop — mutates `messages` in place too, but in OpenAI's flatter
 // { role, content, tool_calls } shape, which is NOT interchangeable with
 // Claude's block format above. Don't mix history between providers mid-session.
 async function runOpenAiLoop(messages, runTool) {
-    let message = await callOpenAI(messages);
+  let data = await callOpenAI(messages);
+  let message = data.choices[0].message;
+  let inputTokens = data.usage?.prompt_tokens || 0;
+  let outputTokens = data.usage?.completion_tokens || 0;
 
-    while (message.tool_calls && message.tool_calls.length > 0) {
-        messages.push(message);
+  while (message.tool_calls && message.tool_calls.length > 0) {
+    messages.push(message);
 
-        for (const call of message.tool_calls) {
-            const input = JSON.parse(call.function.arguments || '{}');
-            const result = await runTool(call.function.name, input);
-            messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
-        }
-
-        message = await callOpenAI(messages);
+    for (const call of message.tool_calls) {
+      const input = JSON.parse(call.function.arguments || '{}');
+      const result = await runTool(call.function.name, input);
+      messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
     }
 
-    messages.push(message);
-    return message.content || '';
+    data = await callOpenAI(messages);
+    message = data.choices[0].message;
+    inputTokens += data.usage?.prompt_tokens || 0;
+    outputTokens += data.usage?.completion_tokens || 0;
+  }
+
+  messages.push(message);
+  return { text: message.content || '', inputTokens, outputTokens };
 }
 
 // Fix #7 + #8: timeout on the upstream call, and check response.ok before
 // trusting the shape of the body (data.content might not exist on an error)
 async function callClaude(messages) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
-    try {
-        const resp = await fetch('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'x-api-key': process.env.ANTHROPIC_API_KEY,
-                'anthropic-version': '2023-06-01'
-            },
-            body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1024, system: SYSTEM_PROMPT, tools, messages }),
-            signal: controller.signal
-        });
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1024, system: SYSTEM_PROMPT, tools, messages }),
+      signal: controller.signal
+    });
 
-        const data = await resp.json();
+    const data = await resp.json();
 
-        if (!resp.ok) {
-            console.error('Claude API error', resp.status, data.error);
-            throw new Error(data.error?.message || 'Upstream API error');
-        }
-
-        return data;
-    } finally {
-        clearTimeout(timeout);
+    if (!resp.ok) {
+      console.error('Claude API error', resp.status, data.error);
+      throw new Error(data.error?.message || 'Upstream API error');
     }
+
+    return data;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 // Same fixes (#7 timeout, #8 safe error parsing) applied to the OpenAI branch.
 async function callOpenAI(messages) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
-    try {
-        const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
-            },
-            body: JSON.stringify({
-                model: OPENAI_MODEL,
-                messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
-                tools: openaiTools,
-                tool_choice: 'auto'
-            }),
-            signal: controller.signal
-        });
+  try {
+    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
+        tools: openaiTools,
+        tool_choice: 'auto'
+      }),
+      signal: controller.signal
+    });
 
-        const data = await resp.json();
+    const data = await resp.json();
 
-        if (!resp.ok) {
-            console.error('OpenAI API error', resp.status, data.error);
-            throw new Error(data.error?.message || 'Upstream API error');
-        }
-
-        return data.choices[0].message;
-    } finally {
-        clearTimeout(timeout);
+    if (!resp.ok) {
+      console.error('OpenAI API error', resp.status, data.error);
+      throw new Error(data.error?.message || 'Upstream API error');
     }
+
+    return data;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
