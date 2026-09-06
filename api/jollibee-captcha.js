@@ -14,7 +14,7 @@
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
-const TENANT = 'restaurant-demo';
+const TENANT = 'jollibee';
 const SESSION_SECRET = process.env.SESSION_HMAC_SECRET;
 const TURNSTILE_SECRET = process.env.TURNSTILE_SECRET_KEY;
 const ALLOWED_ORIGINS = ['https://reysan.ca'];
