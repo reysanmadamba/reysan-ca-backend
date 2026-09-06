@@ -63,7 +63,7 @@ Flow you must follow, in order:
 6. When they're ready to order, use suggest_items to show a running summary, then confirm_order only after they explicitly say it's correct.
 7. Keep responses short and friendly, like a cashier taking an order — not a scripted bot.
 8. If asked something unrelated to ordering from this restaurant, politely say you can only help with the menu and orders here, and call flag_off_topic in that same turn. Do this every time it happens, even if you already warned them once — the system tracks the count and ends the conversation automatically after a few, you don't need to count it yourself. If the tool result comes back with limit_reached: true, say a brief, polite goodbye (e.g. "Sorry, I need to wrap up this conversation since it's moved away from ordering — feel free to start a new chat anytime!") and don't continue answering further off-topic questions after that.
-9. If the customer explicitly asks to talk to a real person or staff member — at ANY point, even before ordering — take it seriously right away. If you don't have their name and phone yet, ask for it first ("Sure, can I get your name and number so our team can reach you?"), then call flag_wants_human once you have it. If it returns need_identity_first, that means you tried without their info yet — ask for it. Once flagged, tell them warmly that a team member will join the chat shortly.
+9. If the customer explicitly asks to talk to a real person or staff member — at ANY point, even before ordering — take it seriously right away. Check first: did they already give their name and phone earlier in this conversation (you asked for it, verified it, or already flagged them for a human once before)? If so, don't ask again — just call flag_wants_human immediately. Only ask for name/phone if you genuinely don't have it yet in this conversation. If flag_wants_human returns need_identity_first, that means the system doesn't have it either — ask for it then. Once flagged, tell them warmly that a team member will join shortly.
 
 Be a good cashier, not a search box. Real cashiers make conversation and suggest things:
 - If the customer seems unsure what to get, ask a light question first — "feeling like chicken today, or something else?" — instead of just listing the whole menu.
@@ -123,7 +123,7 @@ const tools = [
   },
   {
     name: 'search_menu',
-    description: 'Search the menu by category, keyword, or dietary filter.',
+    description: 'Search the menu by category, keyword, or dietary filter. When the customer names a specific item (e.g. "Halo-Halo"), search by keyword — don\'t guess a category name, since category matching needs to be reasonably close to the real category and a wrong guess returns nothing even if the item exists.',
     input_schema: {
       type: 'object',
       properties: {
@@ -294,7 +294,7 @@ async function verifyOtp({ code }, customerId) {
 
 async function searchMenu({ category, keyword, veg_only, max_price }, tenantId) {
   let query = supabase.from('menu_items').select('*').eq('tenant_id', tenantId).eq('active', true);
-  if (category) query = query.ilike('category', category);
+  if (category) query = query.ilike('category', `%${category}%`);
   if (veg_only) query = query.eq('veg', true);
   if (max_price) query = query.lte('price', max_price);
   const { data, error } = await query;
@@ -440,12 +440,12 @@ export default async function handler(req, res) {
     }
 
     let newMessages = [];
-    if (req.body.messagesSince) {
+    if (req.body.messagesSince && customerId) {
       const { data: msgs } = await supabase
         .from('conversation_messages')
         .select('sender, message, created_at')
         .eq('tenant_id', tenantId)
-        .eq('session_id', session.sessionId)
+        .eq('customer_id', customerId)
         .in('sender', ['staff', 'ai'])
         .gt('created_at', req.body.messagesSince)
         .order('created_at', { ascending: true });
@@ -469,6 +469,7 @@ export default async function handler(req, res) {
       await supabase.from('conversation_messages').insert({
         tenant_id: tenantId,
         session_id: session.sessionId,
+        customer_id: customerId,
         order_id: orderId || null,
         sender: 'customer',
         message
@@ -556,6 +557,7 @@ export default async function handler(req, res) {
       tenant_id: tenantId,
       source: TENANT_SLUG,
       session_id: session.sessionId,
+      customer_id: currentCustomerId || null,
       question: message,
       answer: replyText,
       ip: clientIp,

@@ -40,27 +40,21 @@ async function resolveCustomerContext({ order_id, customer_id }, tenantId) {
 // question/answer pairs) with conversation_messages (takeover-era, one row
 // per sender) into a single chronological view — staff shouldn't have to
 // check two different places to see the whole conversation.
-async function fetchMergedConversation(tenantId, sessionId) {
-  if (!sessionId) return [];
+async function fetchMergedConversation(tenantId, sessionId, customerId) {
+  if (!sessionId && !customerId) return [];
 
-  const { data: turns } = await supabaseAdmin
-    .from('chat_logs')
-    .select('question, answer, created_at')
-    .eq('tenant_id', tenantId)
-    .eq('session_id', sessionId)
-    .order('created_at', { ascending: true });
+  let chatLogsQuery = supabaseAdmin.from('chat_logs').select('question, answer, created_at').eq('tenant_id', tenantId);
+  chatLogsQuery = customerId ? chatLogsQuery.or(`customer_id.eq.${customerId},session_id.eq.${sessionId}`) : chatLogsQuery.eq('session_id', sessionId);
+  const { data: turns } = await chatLogsQuery.order('created_at', { ascending: true });
 
   const fromChatLogs = (turns || []).flatMap((t) => [
     { sender: 'customer', message: t.question, created_at: t.created_at },
     { sender: 'ai', message: t.answer, created_at: t.created_at }
   ]);
 
-  const { data: liveMsgs } = await supabaseAdmin
-    .from('conversation_messages')
-    .select('sender, message, created_at')
-    .eq('tenant_id', tenantId)
-    .eq('session_id', sessionId)
-    .order('created_at', { ascending: true });
+  let liveQuery = supabaseAdmin.from('conversation_messages').select('sender, message, created_at').eq('tenant_id', tenantId);
+  liveQuery = customerId ? liveQuery.or(`customer_id.eq.${customerId},session_id.eq.${sessionId}`) : liveQuery.eq('session_id', sessionId);
+  const { data: liveMsgs } = await liveQuery.order('created_at', { ascending: true });
 
   return [...fromChatLogs, ...(liveMsgs || [])].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 }
@@ -90,7 +84,7 @@ export default async function handler(req, res) {
           { order_id: req.query.live_messages_for, customer_id: req.query.live_messages_for_customer },
           resolved.tenantId
         );
-        const messages = await fetchMergedConversation(resolved.tenantId, ctx.sessionId);
+        const messages = await fetchMergedConversation(resolved.tenantId, ctx.sessionId, ctx.customer.id);
         return res.status(200).json({
           messages,
           takeoverActive: ctx.customer?.takeover_active || false,
@@ -164,6 +158,7 @@ export default async function handler(req, res) {
         await supabaseAdmin.from('conversation_messages').insert({
           tenant_id: resolved.tenantId,
           session_id: ctx.sessionId,
+          customer_id: ctx.customer.id,
           order_id: ctx.orderId,
           sender: 'staff',
           message: "👋 A team member has joined this chat to help you directly."
@@ -177,6 +172,7 @@ export default async function handler(req, res) {
         const { error } = await supabaseAdmin.from('conversation_messages').insert({
           tenant_id: resolved.tenantId,
           session_id: ctx.sessionId,
+          customer_id: ctx.customer.id,
           order_id: ctx.orderId,
           sender: 'staff',
           message: staff_message
@@ -191,7 +187,7 @@ export default async function handler(req, res) {
         const { data: tenantRow } = await supabaseAdmin.from('tenants').select('ai_provider').eq('id', resolved.tenantId).single();
         const provider = tenantRow?.ai_provider || 'claude';
 
-        const fullConversation = await fetchMergedConversation(resolved.tenantId, ctx.sessionId);
+        const fullConversation = await fetchMergedConversation(resolved.tenantId, ctx.sessionId, ctx.customer.id);
         const transcriptText = fullConversation.map((m) => `${m.sender.toUpperCase()}: ${m.message}`).join('\n');
 
         const FINALIZE_SYSTEM_PROMPT = `You are finalizing a food order after a staff member helped the customer during a live handoff. Read the conversation below and call confirm_order with the FULL final item list the customer and staff agreed on. Then write a short, friendly closing message confirming the order and its total, mentioning GST. Never invent menu items — only use ones already referenced in the conversation below. If no order was actually agreed on (e.g. the customer only asked a question), don't call confirm_order — just write a short, friendly closing message instead.
@@ -244,6 +240,7 @@ ${transcriptText}`;
         await supabaseAdmin.from('conversation_messages').insert({
           tenant_id: resolved.tenantId,
           session_id: ctx.sessionId,
+          customer_id: ctx.customer.id,
           order_id: ctx.orderId,
           sender: 'ai',
           message: finalReply
