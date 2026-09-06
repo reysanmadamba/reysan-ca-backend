@@ -17,7 +17,7 @@ const TENANT_SLUG = 'jollibee'; // default demo tenant this chat serves
 
 // Toggle which LLM provider handles the conversation — same pattern as
 // your other demos, single constant, no other code changes needed.
-const AI_PROVIDER = 'openai'; // 'claude' | 'openai'
+const AI_PROVIDER = 'claude'; // 'claude' | 'openai'
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 const OPENAI_MODEL = 'gpt-4o-mini';
 const ALLOWED_ORIGINS = ['https://reysan.ca'];
@@ -60,7 +60,22 @@ Be a good cashier, not a search box. Real cashiers make conversation and suggest
 - Mention what's popular naturally when it fits, e.g. "the Chickenjoy's our best seller if you want something classic."
 - When they've picked mains, suggest a natural add-on once — a side, a drink, or dessert — the way a cashier would ask "you want fries with that?" Don't push if they decline once.
 - Occasionally reference a specific item conversationally — "have you tried the Halo-Halo? it's a customer favorite" — instead of always waiting to be asked.
-- Keep all of this to short, casual asides. One suggestion at a time, never a list of five things back to back. If the customer just wants to order fast and says so, drop the suggestions and take the order.`;
+- Keep all of this to short, casual asides. One suggestion at a time, never a list of five things back to back. If the customer just wants to order fast and says so, drop the suggestions and take the order.
+
+Handling vague or casual quantity language:
+- Customers won't always name the exact menu item. "1 bucket of chicken" means they want one of whatever bucket-sized item exists — use search_menu with category "Buckets" and match it up, don't reject the phrase just because "bucket" isn't a literal item name.
+- If more than one bucket size matches (e.g. 6pc vs 10pc vs the Family Meal), ask which one instead of guessing or telling them their request "doesn't exist." The customer describing what they want loosely is normal — your job is to map it to the real menu, not correct their phrasing.
+- Same logic applies to any category name used casually ("a couple of drinks", "some rice") — search and clarify, never tell them something "isn't a thing" when a reasonable match exists.
+
+If you're genuinely unsure about something (a menu detail search_menu doesn't resolve, a policy question, anything outside what you can look up) — say so plainly and suggest they call the store directly, rather than guessing.
+
+Payment: if asked how to pay, tell them payment happens in-store at pickup — credit, debit, or cash. Nothing is charged online through this chat.
+
+Formatting: this is a plain-text chat window, not a document. Never use markdown formatting — no **bold**, no bullet points with asterisks, no headers. Write like a normal text message.
+
+Phone numbers: whenever you write a phone number back to the customer (confirming it, repeating it), format it with dashes in groups (e.g. 587-123-4321), never as one unbroken string of digits.
+
+Editing an order after confirming it: if the customer says they want to add something after you've already called confirm_order once in this conversation, don't start a second order from scratch. Call confirm_order again with the FULL item list — everything from before plus the new addition — not just the new item by itself. The system will recognize this as an update to the same order rather than a new one, as long as the order hasn't already been accepted by the store.`;
 
 const tools = [
     {
@@ -119,7 +134,7 @@ const tools = [
     },
     {
         name: 'confirm_order',
-        description: 'Place the order once the customer has explicitly confirmed. Only callable after verify_otp has succeeded.',
+        description: 'Place or update the order once the customer has explicitly confirmed. Only callable after verify_otp has succeeded. If the customer already confirmed once this conversation and now wants to add something, call this again with the FULL item list (old items + new) — it updates the same order rather than creating a second one, as long as the store has not yet accepted it.',
         input_schema: {
             type: 'object',
             properties: {
@@ -238,11 +253,30 @@ async function searchMenu({ category, keyword, veg_only, max_price }, tenantId) 
 
 const GST_RATE = 0.05; // Alberta: 5% federal GST, no provincial sales tax
 
-async function confirmOrder({ items, note }, tenantId, customerId, phoneVerified) {
+async function confirmOrder({ items, note }, tenantId, customerId, phoneVerified, existingOrderId) {
     if (!phoneVerified) return { error: 'Phone number must be verified before placing an order.' };
     const subtotal = items.reduce((sum, i) => sum + i.qty * i.price, 0);
     const tax = subtotal * GST_RATE;
     const total = subtotal + tax;
+
+    // If this conversation already confirmed an order, update it instead of
+    // creating a duplicate — but only while the store hasn't accepted it yet.
+    // Once accepted, the kitchen may already be preparing it, so a "new" item
+    // request at that point should become a genuinely separate order.
+    if (existingOrderId) {
+        const { data: existing } = await supabase.from('orders').select('status').eq('id', existingOrderId).maybeSingle();
+        if (existing && existing.status === 'new') {
+            const { data, error } = await supabase
+                .from('orders')
+                .update({ items, subtotal: subtotal.toFixed(2), tax: tax.toFixed(2), total: total.toFixed(2), note: note || null })
+                .eq('id', existingOrderId)
+                .select()
+                .single();
+            if (error) return { error: error.message };
+            return { order_id: data.id, subtotal: data.subtotal, tax: data.tax, total: data.total, status: data.status, updated: true };
+        }
+    }
+
     const { data, error } = await supabase
         .from('orders')
         .insert({
@@ -275,7 +309,7 @@ export default async function handler(req, res) {
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
     const clientIp = getClientIp(req);
-    const { message, history = [], token, customerId, phoneVerified } = req.body;
+    const { message, history = [], token, customerId, phoneVerified, orderId } = req.body;
 
     // verify the Turnstile-issued session token before anything else
     const session = verifyToken(token);
@@ -314,6 +348,7 @@ export default async function handler(req, res) {
     const messages = [...history, { role: 'user', content: message }];
     let currentCustomerId = customerId || null;
     let currentPhoneVerified = phoneVerified || false;
+    let currentOrderId = orderId || null;
 
     // Shared dispatcher — same tool execution regardless of which provider
     // asked for it, so behavior can't drift between the two.
@@ -330,7 +365,11 @@ export default async function handler(req, res) {
         }
         if (name === 'search_menu') return searchMenu(input, tenantId);
         if (name === 'suggest_items') return { ok: true, items: input.items };
-        if (name === 'confirm_order') return confirmOrder(input, tenantId, currentCustomerId, currentPhoneVerified);
+        if (name === 'confirm_order') {
+            const result = await confirmOrder(input, tenantId, currentCustomerId, currentPhoneVerified, currentOrderId);
+            if (result.order_id) currentOrderId = result.order_id;
+            return result;
+        }
         return { error: 'Unknown tool' };
     }
 
@@ -351,7 +390,8 @@ export default async function handler(req, res) {
             reply: replyText,
             history: messages, // mutated in place by whichever provider loop ran
             customerId: currentCustomerId,
-            phoneVerified: currentPhoneVerified
+            phoneVerified: currentPhoneVerified,
+            orderId: currentOrderId
         });
     } catch (err) {
         console.error('jollibee-chat error', err);
