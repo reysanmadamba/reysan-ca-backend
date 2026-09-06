@@ -17,7 +17,7 @@ const TENANT_SLUG = 'jollibee'; // default demo tenant this chat serves
 
 // Toggle which LLM provider handles the conversation — same pattern as
 // your other demos, single constant, no other code changes needed.
-const AI_PROVIDER = 'claude'; // 'claude' | 'openai'
+const AI_PROVIDER = 'openai'; // 'claude' | 'openai'
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 const OPENAI_MODEL = 'gpt-4o-mini';
 const ALLOWED_ORIGINS = ['https://reysan.ca'];
@@ -69,13 +69,15 @@ Handling vague or casual quantity language:
 
 If you're genuinely unsure about something (a menu detail search_menu doesn't resolve, a policy question, anything outside what you can look up) — say so plainly and suggest they call the store directly, rather than guessing.
 
+Checking an existing order: if the customer's first message is about checking on an order rather than placing a new one (e.g. "what's the status of my order", "how much longer"), skip the full name/phone/OTP flow — just ask for their phone number and call check_order_status directly. No verification needed for this, it's read-only.
+
 Payment: if asked how to pay, tell them payment happens in-store at pickup — credit, debit, or cash. Nothing is charged online through this chat.
 
 Formatting: this is a plain-text chat window, not a document. Never use markdown formatting — no **bold**, no bullet points with asterisks, no headers. Write like a normal text message.
 
 Phone numbers: whenever you write a phone number back to the customer (confirming it, repeating it), format it with dashes in groups (e.g. 587-123-4321), never as one unbroken string of digits.
 
-Editing an order after confirming it: if the customer says they want to add something after you've already called confirm_order once in this conversation, don't start a second order from scratch. Call confirm_order again with the FULL item list — everything from before plus the new addition — not just the new item by itself. The system will recognize this as an update to the same order rather than a new one, as long as the order hasn't already been accepted by the store.`;
+Editing an order after confirming it: if the customer says they want to add something after you've already called confirm_order once in this conversation, don't start a second order from scratch. Call confirm_order again with the FULL item list — everything from before plus the new addition — not just the new item by itself. The system will recognize this as an update to the same order rather than a new one, as long as the order hasn't already been accepted by the store. If the tool result comes back with new_separate_order: true, the store already started preparing the first order, so this had to become a second, separate order — tell the customer plainly, e.g. "just a heads up, your first order's already being prepared, so this'll come as a separate order."`;
 
 const tools = [
     {
@@ -154,6 +156,15 @@ const tools = [
                 note: { type: 'string' }
             },
             required: ['items']
+        }
+    },
+    {
+        name: 'check_order_status',
+        description: 'Look up the status and remaining time of a customer\'s most recent order by phone number. Read-only — does not require OTP verification, since no order details are placed or changed.',
+        input_schema: {
+            type: 'object',
+            properties: { phone: { type: 'string' } },
+            required: ['phone']
         }
     }
 ];
@@ -262,7 +273,9 @@ async function confirmOrder({ items, note }, tenantId, customerId, phoneVerified
     // If this conversation already confirmed an order, update it instead of
     // creating a duplicate — but only while the store hasn't accepted it yet.
     // Once accepted, the kitchen may already be preparing it, so a "new" item
-    // request at that point should become a genuinely separate order.
+    // request at that point becomes a genuinely separate order, and the AI
+    // needs to say so explicitly rather than let the customer assume it merged.
+    let splitBecauseAccepted = false;
     if (existingOrderId) {
         const { data: existing } = await supabase.from('orders').select('status').eq('id', existingOrderId).maybeSingle();
         if (existing && existing.status === 'new') {
@@ -275,6 +288,7 @@ async function confirmOrder({ items, note }, tenantId, customerId, phoneVerified
             if (error) return { error: error.message };
             return { order_id: data.id, subtotal: data.subtotal, tax: data.tax, total: data.total, status: data.status, updated: true };
         }
+        if (existing) splitBecauseAccepted = true;
     }
 
     const { data, error } = await supabase
@@ -292,7 +306,49 @@ async function confirmOrder({ items, note }, tenantId, customerId, phoneVerified
         .select()
         .single();
     if (error) return { error: error.message };
-    return { order_id: data.id, subtotal: data.subtotal, tax: data.tax, total: data.total, status: data.status };
+    return {
+        order_id: data.id,
+        subtotal: data.subtotal,
+        tax: data.tax,
+        total: data.total,
+        status: data.status,
+        ...(splitBecauseAccepted && {
+            new_separate_order: true,
+            note_for_ai: 'The previous order was already accepted and is being prepared, so this had to be placed as a new, separate order — tell the customer this plainly.'
+        })
+    };
+}
+
+function computeRemainingMinutes(order) {
+    if (order.status !== 'accepted' || !order.accepted_at || !order.eta_minutes) return null;
+    const targetMs = new Date(order.accepted_at).getTime() + order.eta_minutes * 60000;
+    return Math.max(0, Math.round((targetMs - Date.now()) / 60000));
+}
+
+async function checkOrderStatus({ phone }, tenantId) {
+    const { data: customer } = await supabase
+        .from('customers')
+        .select('id')
+        .eq('tenant_id', tenantId)
+        .eq('phone', phone)
+        .maybeSingle();
+    if (!customer) return { error: "Couldn't find an order for that phone number." };
+
+    const { data: order } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('customer_id', customer.id)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+    if (!order) return { error: "Couldn't find an order for that phone number." };
+
+    return {
+        status: order.status,
+        eta_minutes: order.eta_minutes,
+        remaining_minutes: computeRemainingMinutes(order),
+        total: order.total
+    };
 }
 
 export default async function handler(req, res) {
@@ -317,6 +373,23 @@ export default async function handler(req, res) {
 
     const tenantId = await getTenant();
     if (!tenantId) return res.status(500).json({ error: 'Configuration error.' });
+
+    // Lightweight polling path — the widget calls this every ~15s while
+    // waiting on an order. No LLM call, no rate-limit cost: just a read.
+    if (req.body.checkStatus && orderId) {
+        const { data: order } = await supabase
+            .from('orders')
+            .select('status, eta_minutes, accepted_at')
+            .eq('id', orderId)
+            .eq('tenant_id', tenantId)
+            .maybeSingle();
+        if (!order) return res.status(404).json({ error: 'Order not found.' });
+        return res.status(200).json({
+            status: order.status,
+            eta_minutes: order.eta_minutes,
+            remaining_minutes: computeRemainingMinutes(order)
+        });
+    }
 
     // Fix #9: ban check uses the corrected IP from fix #1
     const { data: ban } = await supabase
@@ -365,6 +438,7 @@ export default async function handler(req, res) {
         }
         if (name === 'search_menu') return searchMenu(input, tenantId);
         if (name === 'suggest_items') return { ok: true, items: input.items };
+        if (name === 'check_order_status') return checkOrderStatus(input, tenantId);
         if (name === 'confirm_order') {
             const result = await confirmOrder(input, tenantId, currentCustomerId, currentPhoneVerified, currentOrderId);
             if (result.order_id) currentOrderId = result.order_id;
