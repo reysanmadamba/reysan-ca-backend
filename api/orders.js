@@ -1,16 +1,12 @@
-// api/jollibee-orders.js
+// api/orders.js
 //
-// GET  -> list orders for this tenant, joined with customer name/phone
+// GET  -> list orders for the caller's tenant (tenant_admin) or a specified
+//         tenant (super_admin, via ?tenant_id=)
 // PATCH -> update an order's status/eta; on accept, logs a mock SMS
-//          (no real Twilio wired up yet, this just records what WOULD be sent)
 
-import { createClient } from '@supabase/supabase-js';
-import { verifyAuth } from './auth-check.js';
+import { supabaseAdmin, verifyAuth, resolveTenantId } from './auth-check.js';
 
-const TENANT_SLUG = 'jollibee';
 const ALLOWED_ORIGINS = ['https://reysan.ca'];
-
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
 export default async function handler(req, res) {
     const origin = req.headers.origin;
@@ -22,17 +18,17 @@ export default async function handler(req, res) {
         return res.status(204).end();
     }
 
-    const auth = await verifyAuth(req, TENANT_SLUG);
+    const auth = await verifyAuth(req);
     if (auth.error) return res.status(auth.status).json({ error: auth.error });
 
-    const { data: tenant } = await supabase.from('tenants').select('id').eq('slug', TENANT_SLUG).single();
-    if (!tenant) return res.status(500).json({ error: 'Configuration error' });
-
     if (req.method === 'GET') {
-        const { data, error } = await supabase
+        const resolved = resolveTenantId(auth, req.query.tenant_id);
+        if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
+
+        const { data, error } = await supabaseAdmin
             .from('orders')
             .select('*, customers(name, phone, area_code_flag, phone_verified)')
-            .eq('tenant_id', tenant.id)
+            .eq('tenant_id', resolved.tenantId)
             .order('created_at', { ascending: false })
             .limit(50);
         if (error) return res.status(500).json({ error: error.message });
@@ -40,28 +36,28 @@ export default async function handler(req, res) {
     }
 
     if (req.method === 'PATCH') {
-        const { order_id, status, eta_minutes } = req.body;
+        const { order_id, status, eta_minutes, tenant_id } = req.body;
         if (!order_id || !status) return res.status(400).json({ error: 'order_id and status are required' });
+
+        const resolved = resolveTenantId(auth, tenant_id);
+        if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
 
         const update = { status, updated_at: new Date().toISOString() };
         if (eta_minutes !== undefined) update.eta_minutes = eta_minutes;
 
-        const { data: order, error } = await supabase
+        const { data: order, error } = await supabaseAdmin
             .from('orders')
             .update(update)
             .eq('id', order_id)
-            .eq('tenant_id', tenant.id)
+            .eq('tenant_id', resolved.tenantId) // can't touch another tenant's order even by guessing an id
             .select('*, customers(name, phone)')
             .single();
         if (error) return res.status(500).json({ error: error.message });
 
-        // On accept: log a mock SMS. status is 'mock_sent' so it's obvious in
-        // the data this was never actually texted — swap this block out for a
-        // real Twilio call later without touching anything else here.
         if (status === 'accepted' && eta_minutes) {
-            const message = `Hi ${order.customers.name}, your Jollibee order has been received! It'll be ready for pickup in about ${eta_minutes} minutes.`;
-            await supabase.from('notifications').insert({
-                tenant_id: tenant.id,
+            const message = `Hi ${order.customers.name}, your order has been received! It'll be ready for pickup in about ${eta_minutes} minutes.`;
+            await supabaseAdmin.from('notifications').insert({
+                tenant_id: resolved.tenantId,
                 customer_id: order.customer_id,
                 order_id: order.id,
                 channel: 'sms',

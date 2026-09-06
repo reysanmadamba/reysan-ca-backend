@@ -1,37 +1,48 @@
 // api/auth-check.js
 //
-// Shared by any dashboard-facing endpoint. Verifies the logged-in user's
-// Supabase Auth session, then checks tenant_users for their role. A
-// tenant_admin can only ever act on their own tenant; a super_admin can
-// act on any tenant.
+// Shared by every dashboard-facing endpoint. Verifies the logged-in user's
+// Supabase Auth session, then checks tenant_users for their role.
+//
+//   super_admin -> tenantId is null here; caller must resolve which tenant
+//                  they want via resolveTenantId() below.
+//   tenant_admin -> locked to exactly the tenant in tenant_users, can never
+//                   act on any other tenant's data.
 
 import { createClient } from '@supabase/supabase-js';
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+export const supabaseAdmin = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
-export async function verifyAuth(req, requiredTenantSlug) {
+export async function verifyAuth(req) {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
     if (!token) return { error: 'Missing authorization token', status: 401 };
 
-    const { data: userData, error: userErr } = await supabase.auth.getUser(token);
+    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token);
     if (userErr || !userData?.user) return { error: 'Invalid or expired session', status: 401 };
 
-    const { data: tenantUser, error: tuErr } = await supabase
+    const { data: tenantUser, error: tuErr } = await supabaseAdmin
         .from('tenant_users')
         .select('role, tenant_id')
         .eq('user_id', userData.user.id)
         .maybeSingle();
     if (tuErr || !tenantUser) return { error: 'No dashboard access configured for this account', status: 403 };
 
-    if (tenantUser.role === 'super_admin') {
-        return { role: 'super_admin', tenantId: null, userId: userData.user.id };
-    }
+    return {
+        role: tenantUser.role,
+        tenantId: tenantUser.role === 'super_admin' ? null : tenantUser.tenant_id,
+        userId: userData.user.id
+    };
+}
 
-    const { data: tenant } = await supabase.from('tenants').select('id').eq('slug', requiredTenantSlug).single();
-    if (!tenant || tenantUser.tenant_id !== tenant.id) {
-        return { error: 'Not authorized for this tenant', status: 403 };
+// Resolves which tenant an already-authenticated request should act on.
+//   - tenant_admin: always their own tenant, regardless of what's passed in.
+//   - super_admin: must explicitly pass tenant_id (query param on GET,
+//     body field on POST/PATCH) since they aren't locked to one.
+export function resolveTenantId(auth, requestedTenantId) {
+    if (auth.role === 'tenant_admin') return { tenantId: auth.tenantId };
+    if (auth.role === 'super_admin') {
+        if (!requestedTenantId) return { error: 'tenant_id is required for super_admin requests', status: 400 };
+        return { tenantId: requestedTenantId };
     }
-
-    return { role: 'tenant_admin', tenantId: tenant.id, userId: userData.user.id };
+    return { error: 'Unrecognized role', status: 403 };
 }
