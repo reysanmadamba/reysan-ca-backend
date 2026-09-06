@@ -63,6 +63,7 @@ Flow you must follow, in order:
 6. When they're ready to order, use suggest_items to show a running summary, then confirm_order only after they explicitly say it's correct.
 7. Keep responses short and friendly, like a cashier taking an order — not a scripted bot.
 8. If asked something unrelated to ordering from this restaurant, politely say you can only help with the menu and orders here, and call flag_off_topic in that same turn. Do this every time it happens, even if you already warned them once — the system tracks the count and ends the conversation automatically after a few, you don't need to count it yourself. If the tool result comes back with limit_reached: true, say a brief, polite goodbye (e.g. "Sorry, I need to wrap up this conversation since it's moved away from ordering — feel free to start a new chat anytime!") and don't continue answering further off-topic questions after that.
+9. If the customer explicitly asks to talk to a real person or staff member — at ANY point, even before ordering — take it seriously right away. If you don't have their name and phone yet, ask for it first ("Sure, can I get your name and number so our team can reach you?"), then call flag_wants_human once you have it. If it returns need_identity_first, that means you tried without their info yet — ask for it. Once flagged, tell them warmly that a team member will join the chat shortly.
 
 Be a good cashier, not a search box. Real cashiers make conversation and suggest things:
 - If the customer seems unsure what to get, ask a light question first — "feeling like chicken today, or something else?" — instead of just listing the whole menu.
@@ -88,7 +89,7 @@ Payment: if asked how to pay, tell them payment happens in-store at pickup — c
 
 Formatting: this is a plain-text chat window, not a document. Never use markdown formatting — no **bold**, no bullet points with asterisks, no headers. Write like a normal text message.
 
-Phone numbers: whenever you write a phone number back to the customer (confirming it, repeating it), format it with dashes in groups (e.g. 587-123-4321), never as one unbroken string of digits.
+Phone numbers: whenever YOU write a phone number back to the customer (confirming it, repeating it), format it with dashes in groups (e.g. 587-123-4321), never as one unbroken string of digits. This is about your own output only — never ask the customer to format their number a certain way, or to "confirm" it in a specific format. They can type it however they want; just verify it's a real phone number and move on.
 
 Confirming an order — never skip the preview step:
 1. Before calling confirm_order, always say back the FULL list you're about to submit and its total, then ask something like "should I go ahead with that?" — in plain text, no tool call.
@@ -202,6 +203,11 @@ const tools = [
     name: 'flag_off_topic',
     description: 'Call this every time the customer asks something unrelated to ordering food from this restaurant (general chit-chat, unrelated topics, anything not about the menu/order/store). Call it in the SAME turn as your warning reply. After a few of these in one conversation, the system will end the chat automatically.',
     input_schema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'flag_wants_human',
+    description: 'Call this the moment the customer explicitly asks to talk to a real person / staff member, in ANY part of the conversation — even before they\'ve ordered or given their name/phone. If you don\'t have their name and phone yet, ask for it first (framed as "so our team can reach you"), then call this once you have it.',
+    input_schema: { type: 'object', properties: {} }
   }
 ];
 
@@ -217,7 +223,7 @@ async function getTenant() {
   return data ? { id: data.id, aiProvider: data.ai_provider || 'claude', contactPhone: data.contact_phone || 'the store' } : null;
 }
 
-async function requestOtp({ name, phone }, tenantId) {
+async function requestOtp({ name, phone }, tenantId, sessionId) {
   const digits = phone.replace(/\D/g, '');
   const areaCode = digits.slice(-10, -7); // last 10 digits, first 3 = area code
   const areaCodeFlag = !ALLOWED_AREA_CODES.includes(areaCode);
@@ -239,11 +245,13 @@ async function requestOtp({ name, phone }, tenantId) {
   if (!customer) {
     const { data: newCustomer, error } = await supabase
       .from('customers')
-      .insert({ tenant_id: tenantId, name, phone: digits, area_code_flag: areaCodeFlag })
+      .insert({ tenant_id: tenantId, name, phone: digits, area_code_flag: areaCodeFlag, last_session_id: sessionId })
       .select()
       .single();
     if (error) return { error: error.message };
     customer = newCustomer;
+  } else {
+    await supabase.from('customers').update({ last_session_id: sessionId }).eq('id', customer.id);
   }
 
   const code = String(Math.floor(100000 + Math.random() * 900000));
@@ -406,16 +414,30 @@ export default async function handler(req, res) {
   const tenantId = tenant.id;
   const activeProvider = tenant.aiProvider; // per-tenant switch, no redeploy needed to change it
 
-  // Lightweight polling path — the widget calls this every ~15s while
-  // waiting on an order. No LLM call, no rate-limit cost: just a read.
-  if (req.body.checkStatus && orderId) {
-    const { data: order } = await supabase
-      .from('orders')
-      .select('status, eta_minutes, accepted_at, takeover_active')
-      .eq('id', orderId)
-      .eq('tenant_id', tenantId)
-      .maybeSingle();
-    if (!order) return res.status(404).json({ error: 'Order not found.' });
+  // Lightweight polling path — the widget calls this every ~15s. Message
+  // checking works from the moment a session exists (no order needed, so a
+  // customer can be in an active takeover before ever placing an order);
+  // order status only applies once orderId exists.
+  if (req.body.checkStatus) {
+    let statusPayload = {};
+
+    if (orderId) {
+      const { data: order } = await supabase
+        .from('orders')
+        .select('status, eta_minutes, accepted_at')
+        .eq('id', orderId)
+        .eq('tenant_id', tenantId)
+        .maybeSingle();
+      if (order) {
+        statusPayload = { status: order.status, eta_minutes: order.eta_minutes, remaining_minutes: computeRemainingMinutes(order) };
+      }
+    }
+
+    let takeoverActive = false;
+    if (customerId) {
+      const { data: cust } = await supabase.from('customers').select('takeover_active').eq('id', customerId).maybeSingle();
+      takeoverActive = cust?.takeover_active || false;
+    }
 
     let newMessages = [];
     if (req.body.messagesSince) {
@@ -423,38 +445,31 @@ export default async function handler(req, res) {
         .from('conversation_messages')
         .select('sender, message, created_at')
         .eq('tenant_id', tenantId)
-        .eq('order_id', orderId)
+        .eq('session_id', session.sessionId)
         .in('sender', ['staff', 'ai'])
         .gt('created_at', req.body.messagesSince)
         .order('created_at', { ascending: true });
       newMessages = msgs || [];
     }
 
-    return res.status(200).json({
-      status: order.status,
-      eta_minutes: order.eta_minutes,
-      remaining_minutes: computeRemainingMinutes(order),
-      takeoverActive: order.takeover_active,
-      newMessages
-    });
+    return res.status(200).json({ ...statusPayload, takeoverActive, newMessages });
   }
 
-  // If this order is under active staff takeover, log the customer's
-  // message for staff to see and skip the AI entirely — no auto-reply,
-  // no tokens spent, until staff hands control back.
-  if (orderId) {
-    const { data: activeOrder } = await supabase
-      .from('orders')
-      .select('takeover_active, session_id')
-      .eq('id', orderId)
-      .eq('tenant_id', tenantId)
+  // If staff has taken over THIS CUSTOMER's conversation (not tied to any
+  // specific order — a customer can ask for a human before ever ordering),
+  // log their message for staff to see and skip the AI entirely.
+  if (customerId) {
+    const { data: activeCustomer } = await supabase
+      .from('customers')
+      .select('takeover_active')
+      .eq('id', customerId)
       .maybeSingle();
 
-    if (activeOrder?.takeover_active) {
+    if (activeCustomer?.takeover_active) {
       await supabase.from('conversation_messages').insert({
         tenant_id: tenantId,
-        session_id: activeOrder.session_id || session.sessionId,
-        order_id: orderId,
+        session_id: session.sessionId,
+        order_id: orderId || null,
         sender: 'customer',
         message
       });
@@ -499,7 +514,7 @@ export default async function handler(req, res) {
   // asked for it, so behavior can't drift between the two.
   async function runTool(name, input) {
     if (name === 'request_otp') {
-      const result = await requestOtp(input, tenantId);
+      const result = await requestOtp(input, tenantId, session.sessionId);
       if (result.customer_id) currentCustomerId = result.customer_id;
       return result;
     }
@@ -515,6 +530,12 @@ export default async function handler(req, res) {
     if (name === 'flag_off_topic') {
       currentOffTopicCount += 1;
       return { count: currentOffTopicCount, limit_reached: currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS };
+    }
+    if (name === 'flag_wants_human') {
+      if (!currentCustomerId) return { error: 'need_identity_first' };
+      const { error } = await supabase.from('customers').update({ wants_human: true, last_session_id: session.sessionId }).eq('id', currentCustomerId);
+      if (error) return { error: error.message };
+      return { flagged: true };
     }
     if (name === 'confirm_order') {
       const result = await confirmOrder(input, tenantId, currentCustomerId, currentPhoneVerified, currentOrderId, session.sessionId);

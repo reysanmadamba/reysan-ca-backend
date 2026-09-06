@@ -9,8 +9,61 @@ import { confirmOrder } from '../lib/ordering.js';
 import { runClaudeLoop, runOpenAiLoop } from '../lib/llm.js';
 
 const ALLOWED_ORIGINS = ['https://reysan.ca'];
-
 const GST_RATE = 0.05; // Alberta: 5% federal GST, no provincial sales tax
+
+// Resolves a customer + their current session, given either an order_id or
+// a customer_id directly — a customer can be in takeover before ever
+// placing an order, so this can't always start from an order.
+async function resolveCustomerContext({ order_id, customer_id }, tenantId) {
+  if (customer_id) {
+    const { data: customer, error } = await supabaseAdmin
+      .from('customers')
+      .select('id, name, phone, phone_verified, takeover_active, last_session_id')
+      .eq('id', customer_id)
+      .eq('tenant_id', tenantId)
+      .single();
+    if (error) throw new Error(error.message);
+    return { customer, orderId: order_id || null, sessionId: customer.last_session_id };
+  }
+
+  const { data: order, error } = await supabaseAdmin
+    .from('orders')
+    .select('id, session_id, customer_id, customers(id, name, phone, phone_verified, takeover_active, last_session_id)')
+    .eq('id', order_id)
+    .eq('tenant_id', tenantId)
+    .single();
+  if (error) throw new Error(error.message);
+  return { customer: order.customers, orderId: order.id, sessionId: order.session_id || order.customers.last_session_id };
+}
+
+// Merges chat_logs (the normal pre-takeover AI conversation, stored as
+// question/answer pairs) with conversation_messages (takeover-era, one row
+// per sender) into a single chronological view — staff shouldn't have to
+// check two different places to see the whole conversation.
+async function fetchMergedConversation(tenantId, sessionId) {
+  if (!sessionId) return [];
+
+  const { data: turns } = await supabaseAdmin
+    .from('chat_logs')
+    .select('question, answer, created_at')
+    .eq('tenant_id', tenantId)
+    .eq('session_id', sessionId)
+    .order('created_at', { ascending: true });
+
+  const fromChatLogs = (turns || []).flatMap((t) => [
+    { sender: 'customer', message: t.question, created_at: t.created_at },
+    { sender: 'ai', message: t.answer, created_at: t.created_at }
+  ]);
+
+  const { data: liveMsgs } = await supabaseAdmin
+    .from('conversation_messages')
+    .select('sender, message, created_at')
+    .eq('tenant_id', tenantId)
+    .eq('session_id', sessionId)
+    .order('created_at', { ascending: true });
+
+  return [...fromChatLogs, ...(liveMsgs || [])].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+}
 
 export default async function handler(req, res) {
   const origin = req.headers.origin;
@@ -29,50 +82,36 @@ export default async function handler(req, res) {
     const resolved = resolveTenantId(auth, req.query.tenant_id);
     if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
 
-    // Conversation transcript for a specific order — looks up the order's
-    // session_id, then pulls every chat_logs turn from that same session.
-    if (req.query.transcript_for) {
-      const { data: order, error: orderErr } = await supabaseAdmin
-        .from('orders')
-        .select('session_id')
-        .eq('id', req.query.transcript_for)
-        .eq('tenant_id', resolved.tenantId)
-        .single();
-      if (orderErr) return res.status(500).json({ error: orderErr.message });
-      if (!order.session_id) return res.status(200).json({ transcript: [], note: 'No session linked to this order (placed before transcript tracking was added).' });
-
-      const { data: turns, error: turnsErr } = await supabaseAdmin
-        .from('chat_logs')
-        .select('question, answer, created_at')
-        .eq('tenant_id', resolved.tenantId)
-        .eq('session_id', order.session_id)
-        .order('created_at', { ascending: true });
-      if (turnsErr) return res.status(500).json({ error: turnsErr.message });
-
-      return res.status(200).json({ transcript: turns });
+    // Full merged conversation for an order OR a bare customer (pre-order
+    // takeover) — one call, one chronological view, no separate buttons.
+    if (req.query.live_messages_for || req.query.live_messages_for_customer) {
+      try {
+        const ctx = await resolveCustomerContext(
+          { order_id: req.query.live_messages_for, customer_id: req.query.live_messages_for_customer },
+          resolved.tenantId
+        );
+        const messages = await fetchMergedConversation(resolved.tenantId, ctx.sessionId);
+        return res.status(200).json({
+          messages,
+          takeoverActive: ctx.customer?.takeover_active || false,
+          customerId: ctx.customer?.id || null,
+          customerName: ctx.customer?.name || null
+        });
+      } catch (err) {
+        return res.status(500).json({ error: err.message });
+      }
     }
 
-    // Live takeover messages — used while the dashboard's takeover chat
-    // panel is open, polled to pick up new customer messages.
-    if (req.query.live_messages_for) {
-      const { data: order, error: orderErr } = await supabaseAdmin
-        .from('orders')
-        .select('session_id, takeover_active')
-        .eq('id', req.query.live_messages_for)
+    // Customers who explicitly asked for a real person — shown as an
+    // urgent, always-visible alert regardless of whether they've ordered.
+    if (req.query.wants_human === 'true') {
+      const { data, error } = await supabaseAdmin
+        .from('customers')
+        .select('id, name, phone, takeover_active')
         .eq('tenant_id', resolved.tenantId)
-        .single();
-      if (orderErr) return res.status(500).json({ error: orderErr.message });
-      if (!order.session_id) return res.status(200).json({ messages: [], takeoverActive: false });
-
-      const { data: msgs, error: msgsErr } = await supabaseAdmin
-        .from('conversation_messages')
-        .select('sender, message, created_at')
-        .eq('tenant_id', resolved.tenantId)
-        .eq('session_id', order.session_id)
-        .order('created_at', { ascending: true });
-      if (msgsErr) return res.status(500).json({ error: msgsErr.message });
-
-      return res.status(200).json({ messages: msgs, takeoverActive: order.takeover_active });
+        .eq('wants_human', true);
+      if (error) return res.status(500).json({ error: error.message });
+      return res.status(200).json({ customers: data });
     }
 
     const { data, error } = await supabaseAdmin
@@ -94,28 +133,42 @@ export default async function handler(req, res) {
   }
 
   if (req.method === 'PATCH') {
-    const { order_id, status, eta_minutes, needs_attention, attention_note, items, ban_customer_id, unban_customer_id, takeover_action, staff_message, tenant_id } = req.body;
+    const {
+      order_id, status, eta_minutes, needs_attention, attention_note, items,
+      ban_customer_id, unban_customer_id, takeover_action, staff_message,
+      takeover_customer_id, tenant_id
+    } = req.body;
     const resolved = resolveTenantId(auth, tenant_id);
     if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
 
     // Live takeover: staff pausing the AI, sending a manual message, or
     // handing control back (which triggers the AI to finalize the order
     // based on the full conversation, including what staff/customer agreed).
+    // Keyed on the CUSTOMER, not the order — a customer can ask for a human
+    // before ever placing one.
     if (takeover_action) {
-      if (!order_id) return res.status(400).json({ error: 'order_id is required' });
-
-      const { data: order, error: orderErr } = await supabaseAdmin
-        .from('orders')
-        .select('*, customers(id, phone_verified)')
-        .eq('id', order_id)
-        .eq('tenant_id', resolved.tenantId)
-        .single();
-      if (orderErr) return res.status(500).json({ error: orderErr.message });
-      if (!order.session_id) return res.status(400).json({ error: 'No chat session linked to this order.' });
+      let ctx;
+      try {
+        ctx = await resolveCustomerContext({ order_id, customer_id: takeover_customer_id }, resolved.tenantId);
+      } catch (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      if (!ctx.sessionId) return res.status(400).json({ error: 'No chat session found for this customer yet.' });
 
       if (takeover_action === 'start') {
-        const { error } = await supabaseAdmin.from('orders').update({ takeover_active: true }).eq('id', order_id);
+        const { error } = await supabaseAdmin.from('customers').update({ takeover_active: true }).eq('id', ctx.customer.id);
         if (error) return res.status(500).json({ error: error.message });
+
+        // Auto-notify the customer a real person has joined — staff
+        // shouldn't have to remember to say this themselves every time.
+        await supabaseAdmin.from('conversation_messages').insert({
+          tenant_id: resolved.tenantId,
+          session_id: ctx.sessionId,
+          order_id: ctx.orderId,
+          sender: 'staff',
+          message: "👋 A team member has joined this chat to help you directly."
+        });
+
         return res.status(200).json({ ok: true });
       }
 
@@ -123,8 +176,8 @@ export default async function handler(req, res) {
         if (!staff_message) return res.status(400).json({ error: 'staff_message is required' });
         const { error } = await supabaseAdmin.from('conversation_messages').insert({
           tenant_id: resolved.tenantId,
-          session_id: order.session_id,
-          order_id,
+          session_id: ctx.sessionId,
+          order_id: ctx.orderId,
           sender: 'staff',
           message: staff_message
         });
@@ -133,21 +186,15 @@ export default async function handler(req, res) {
       }
 
       if (takeover_action === 'resume') {
-        await supabaseAdmin.from('orders').update({ takeover_active: false }).eq('id', order_id);
+        await supabaseAdmin.from('customers').update({ takeover_active: false, wants_human: false }).eq('id', ctx.customer.id);
 
         const { data: tenantRow } = await supabaseAdmin.from('tenants').select('ai_provider').eq('id', resolved.tenantId).single();
         const provider = tenantRow?.ai_provider || 'claude';
 
-        const { data: msgs } = await supabaseAdmin
-          .from('conversation_messages')
-          .select('sender, message, created_at')
-          .eq('tenant_id', resolved.tenantId)
-          .eq('session_id', order.session_id)
-          .order('created_at', { ascending: true });
+        const fullConversation = await fetchMergedConversation(resolved.tenantId, ctx.sessionId);
+        const transcriptText = fullConversation.map((m) => `${m.sender.toUpperCase()}: ${m.message}`).join('\n');
 
-        const transcriptText = (msgs || []).map((m) => `${m.sender.toUpperCase()}: ${m.message}`).join('\n');
-
-        const FINALIZE_SYSTEM_PROMPT = `You are finalizing a food order after a staff member resolved a change with the customer during a live handoff. Read the conversation below and call confirm_order with the FULL final item list the customer and staff agreed on. Then write a short, friendly closing message confirming the order and its total, mentioning GST. Never invent menu items — only use ones already referenced in the conversation below.
+        const FINALIZE_SYSTEM_PROMPT = `You are finalizing a food order after a staff member helped the customer during a live handoff. Read the conversation below and call confirm_order with the FULL final item list the customer and staff agreed on. Then write a short, friendly closing message confirming the order and its total, mentioning GST. Never invent menu items — only use ones already referenced in the conversation below. If no order was actually agreed on (e.g. the customer only asked a question), don't call confirm_order — just write a short, friendly closing message instead.
 
 Conversation:
 ${transcriptText}`;
@@ -177,14 +224,14 @@ ${transcriptText}`;
 
         async function runTool(name, input) {
           if (name === 'confirm_order') {
-            return confirmOrder(input, resolved.tenantId, order.customer_id, order.customers?.phone_verified || false, order.id, order.session_id);
+            return confirmOrder(input, resolved.tenantId, ctx.customer.id, ctx.customer.phone_verified || false, ctx.orderId, ctx.sessionId);
           }
           return { error: 'Unknown tool' };
         }
 
         let finalReply;
         try {
-          const messages = [{ role: 'user', content: 'Please finalize this order based on the conversation above.' }];
+          const messages = [{ role: 'user', content: 'Please finalize this based on the conversation above.' }];
           const result =
             provider === 'openai'
               ? await runOpenAiLoop(messages, runTool, { model: 'gpt-4o-mini', systemPrompt: FINALIZE_SYSTEM_PROMPT, tools: openaiTools })
@@ -196,8 +243,8 @@ ${transcriptText}`;
 
         await supabaseAdmin.from('conversation_messages').insert({
           tenant_id: resolved.tenantId,
-          session_id: order.session_id,
-          order_id,
+          session_id: ctx.sessionId,
+          order_id: ctx.orderId,
           sender: 'ai',
           message: finalReply
         });
