@@ -3,7 +3,7 @@
 // GET  -> list all tenants (super_admin only)
 // POST -> create a new tenant (super_admin only)
 
-import { supabaseAdmin, verifyAuth } from './auth-check.js';
+import { supabaseAdmin, verifyAuth } from '../lib/auth-check.js';
 
 const ALLOWED_ORIGINS = ['https://reysan.ca'];
 

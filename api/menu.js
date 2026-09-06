@@ -6,7 +6,7 @@
 // DELETE -> remove an item (hard delete — remove/soft-delete tradeoff is a
 //           later decision; fine for a demo/early stage)
 
-import { supabaseAdmin, verifyAuth, resolveTenantId } from './auth-check.js';
+import { supabaseAdmin, verifyAuth, resolveTenantId } from '../lib/auth-check.js';
 
 const ALLOWED_ORIGINS = ['https://reysan.ca'];
 

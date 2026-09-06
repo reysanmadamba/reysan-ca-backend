@@ -4,7 +4,7 @@
 //         tenant (super_admin, via ?tenant_id=)
 // PATCH -> update an order's status/eta; on accept, logs a mock SMS
 
-import { supabaseAdmin, verifyAuth, resolveTenantId } from './auth-check.js';
+import { supabaseAdmin, verifyAuth, resolveTenantId } from '../lib/auth-check.js';
 
 const ALLOWED_ORIGINS = ['https://reysan.ca'];
 

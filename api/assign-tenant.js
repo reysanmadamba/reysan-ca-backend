@@ -5,7 +5,7 @@
 // (or super_admin). Does NOT create the login itself — you're doing that
 // step yourself in the Supabase dashboard, same as your own account.
 
-import { supabaseAdmin, verifyAuth } from './auth-check.js';
+import { supabaseAdmin, verifyAuth } from '../lib/auth-check.js';
 
 const ALLOWED_ORIGINS = ['https://reysan.ca'];
 

@@ -4,7 +4,7 @@
 // they locked to. The dashboard needs this before it can decide whether
 // to show a tenant switcher, the admin panel, or just one tenant's data.
 
-import { supabaseAdmin, verifyAuth } from './auth-check.js';
+import { supabaseAdmin, verifyAuth } from '../lib/auth-check.js';
 
 const ALLOWED_ORIGINS = ['https://reysan.ca'];
 
