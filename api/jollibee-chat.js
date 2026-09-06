@@ -69,7 +69,7 @@ Handling vague or casual quantity language:
 
 If you're genuinely unsure about something (a menu detail search_menu doesn't resolve, a policy question, anything outside what you can look up) — say so plainly and suggest they call the store directly, rather than guessing.
 
-Checking an existing order: if the customer's first message is about checking on an order rather than placing a new one (e.g. "what's the status of my order", "how much longer"), skip the full name/phone/OTP flow — just ask for their phone number and call check_order_status directly. No verification needed for this, it's read-only. If they have more than one open order, describe EACH one by its order number, status, and time — never merge them into one total or one status unless the customer explicitly asks for a combined total.
+Checking an existing order: if the customer's first message is about checking on an order rather than placing a new one (e.g. "what's the status of my order", "how much longer"), skip the full name/phone/OTP flow — just ask for their phone number and call check_order_status directly. No verification needed for this, it's read-only. If they have more than one open order, mention each one's status and number, but frame it as one running tab rather than two unrelated charges — e.g. "your original order (#8) is $15.72 and accepted; you added a coffee after that (#9, +$2.09), so your total across both comes to $17.81 [use combined_total from the tool result]." If only one order is open, just report it normally.
 
 Order numbers: every confirmed order gets an order_number in the tool result. Tell the customer this number when you confirm their order ("you're order number 1042") — it's what they'd reference at pickup, not any internal id.
 
@@ -164,7 +164,7 @@ const tools = [
     },
     {
         name: 'check_order_status',
-        description: 'Look up ALL of a customer\'s currently open (not-yet-completed) orders by phone number. A customer may have more than one open order — always report each one separately, never combine or sum them unless the customer explicitly asks for a combined total. Read-only — does not require OTP verification.',
+        description: 'Look up ALL of a customer\'s currently open (not-yet-completed) orders by phone number. Returns an array of orders, and a combined_total when there\'s more than one — present multiple orders as one running tab (base order + additions) using combined_total, not as separate unrelated charges. Read-only — does not require OTP verification.',
         input_schema: {
             type: 'object',
             properties: { phone: { type: 'string' } },
@@ -279,6 +279,7 @@ async function confirmOrder({ items: newItems, note }, tenantId, customerId, pho
     if (!phoneVerified) return { error: 'Phone number must be verified before placing an order.' };
 
     let splitBecauseAccepted = false;
+    let previousOrderTotal = 0;
 
     if (existingOrderId) {
         const { data: existing } = await supabase.from('orders').select('*').eq('id', existingOrderId).maybeSingle();
@@ -307,7 +308,10 @@ async function confirmOrder({ items: newItems, note }, tenantId, customerId, pho
             return { order_id: data.id, order_number: data.order_number, subtotal: data.subtotal, tax: data.tax, total: data.total, status: data.status, updated: true };
         }
 
-        if (existing) splitBecauseAccepted = true;
+        if (existing) {
+            splitBecauseAccepted = true;
+            previousOrderTotal = Number(existing.total || 0);
+        }
     }
 
     // First order, or a split because the previous one is already accepted —
@@ -340,7 +344,8 @@ async function confirmOrder({ items: newItems, note }, tenantId, customerId, pho
         status: data.status,
         ...(splitBecauseAccepted && {
             new_separate_order: true,
-            note_for_ai: 'The previous order was already accepted and is being prepared, so this had to be placed as a new, separate order containing ONLY what was just added — tell the customer plainly that this new order/number is just for the addition, separate from the first one already being made.'
+            combined_total: (previousOrderTotal + total).toFixed(2),
+            note_for_ai: 'The previous order was already accepted and is being prepared, so this had to be placed as a new, separate order containing ONLY what was just added. Tell the customer this as one running tab, not two unrelated charges — e.g. "your original order is being prepared, and I\'ve added this as order #[X] for just the new item(s), so your total across both comes to $[combined_total from this result — use it exactly, don\'t add the numbers yourself]."'
         })
     };
 }
@@ -374,15 +379,19 @@ async function checkOrderStatus({ phone }, tenantId) {
 
     if (!orders || orders.length === 0) return { error: 'No open orders found for that phone number.' };
 
-    return {
-        orders: orders.map((order) => ({
-            order_number: order.order_number,
-            status: order.status,
-            eta_minutes: order.eta_minutes,
-            remaining_minutes: computeRemainingMinutes(order),
-            total: order.total
-        }))
-    };
+    const mapped = orders.map((order) => ({
+        order_number: order.order_number,
+        status: order.status,
+        eta_minutes: order.eta_minutes,
+        remaining_minutes: computeRemainingMinutes(order),
+        total: order.total
+    }));
+
+    const result = { orders: mapped };
+    if (mapped.length > 1) {
+        result.combined_total = mapped.reduce((sum, o) => sum + Number(o.total), 0).toFixed(2);
+    }
+    return result;
 }
 
 export default async function handler(req, res) {
