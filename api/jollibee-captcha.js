@@ -44,11 +44,17 @@ function signToken(payload) {
 
 module.exports = async (req, res) => {
     const origin = req.headers.origin;
-    // Fix #2: CORS header is set for browser convenience only — it is NOT
-    // what blocks unwanted callers. Rate limiting + Turnstile below are the
-    // real gate, since CORS does nothing against a direct server-to-server call.
     if (ALLOWED_ORIGINS.includes(origin)) {
         res.setHeader('Access-Control-Allow-Origin', origin);
+    }
+
+    // Handle the browser's CORS preflight before anything else. A JSON POST
+    // triggers this automatically — without a clean response here, the real
+    // request never even gets sent.
+    if (req.method === 'OPTIONS') {
+        res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+        return res.status(204).end();
     }
 
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
