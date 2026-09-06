@@ -27,19 +27,16 @@ export default async function handler(req, res) {
         const resolved = resolveTenantId(auth, req.query.tenant_id);
         if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
 
-        const { data, error } = await supabaseAdmin
-            .from('menu_items')
-            .select('*')
-            .eq('tenant_id', resolved.tenantId)
-            .eq('active', true)
-            .order('category')
-            .order('name');
+        let query = supabaseAdmin.from('menu_items').select('*').eq('tenant_id', resolved.tenantId);
+        if (req.query.include_inactive !== 'true') query = query.eq('active', true);
+
+        const { data, error } = await query.order('category').order('name');
         if (error) return res.status(500).json({ error: error.message });
         return res.status(200).json({ items: data });
     }
 
     if (req.method === 'POST') {
-        const { tenant_id, category, name, description, price, popular, spicy, allergens, veg } = req.body;
+        const { tenant_id, category, name, description, price, popular, spicy, allergens, veg, attributes } = req.body;
         const resolved = resolveTenantId(auth, tenant_id);
         if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
         if (!category || !name || price === undefined) {
@@ -57,7 +54,8 @@ export default async function handler(req, res) {
                 popular: !!popular,
                 spicy: !!spicy,
                 allergens: allergens || [],
-                veg: !!veg
+                veg: !!veg,
+                attributes: attributes || {}
             })
             .select()
             .single();

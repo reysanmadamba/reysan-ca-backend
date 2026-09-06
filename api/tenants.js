@@ -38,12 +38,17 @@ async function getTenantDetail(tenantId) {
         .eq('tenant_id', tenantId);
     if (tuErr) throw tuErr;
 
-    const admins = await Promise.all(
-        tenantUsers.map(async (tu) => {
-            const { data } = await supabaseAdmin.auth.admin.getUserById(tu.user_id);
-            return { tenant_user_id: tu.id, user_id: tu.user_id, role: tu.role, email: data?.user?.email || 'unknown' };
-        })
-    );
+    // Fixed N+1: one listUsers() call instead of one getUserById() per admin.
+    // This was the actual cause of the 2-3s delay opening a tenant's detail page.
+    const { data: userList } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 200 });
+    const emailById = new Map((userList?.users || []).map((u) => [u.id, u.email]));
+
+    const admins = tenantUsers.map((tu) => ({
+        tenant_user_id: tu.id,
+        user_id: tu.user_id,
+        role: tu.role,
+        email: emailById.get(tu.user_id) || 'unknown'
+    }));
 
     const now = new Date();
     const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -98,6 +103,12 @@ export default async function handler(req, res) {
                 const detail = await getTenantDetail(req.query.id);
                 return res.status(200).json(detail);
             }
+            if (req.query.include_inactive === 'true') {
+                const { data, error } = await supabaseAdmin.from('tenants').select('*').order('created_at', { ascending: false });
+                if (error) return res.status(500).json({ error: error.message });
+                return res.status(200).json({ tenants: data });
+            }
+
             const { data, error } = await supabaseAdmin
                 .from('tenants')
                 .select('*')
