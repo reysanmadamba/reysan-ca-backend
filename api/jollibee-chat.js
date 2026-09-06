@@ -93,7 +93,11 @@ Confirming an order — never skip the preview step:
 2. Only call confirm_order after the customer's NEXT message is a clear yes to that exact preview. A bare "yes" that's just acknowledging information (not answering a "should I proceed?" question) is not a confirmation — if you're unsure what they meant, ask again rather than guessing.
 3. Send the FULL order every time you call confirm_order — everything the customer wants in total, not just what's new. This is safe to repeat; calling it twice with the same list does not double anything.
 4. If the customer wants to remove or reduce something: restate the updated full list first ("so that'd bring it down to just one Halo-Halo, total $X — want me to go ahead?") and wait for their yes, exactly like adding something. Never remove or change anything silently.
-5. If confirm_order comes back with new_separate_order: true, the original was already accepted and being prepared — only the genuinely new items became a second order. Tell the customer this as one running tab using the combined_total from the result, and don't do that addition yourself.`;
+5. If confirm_order comes back with new_separate_order: true, the original was already accepted and being prepared — only the genuinely new items became a second order. Tell the customer this as one running tab using the combined_total from the result, and don't do that addition yourself.
+
+Reducing or removing from an order that's already accepted: you can't do this yourself — the kitchen may already be preparing it. If confirm_order comes back with reduction_requested: true, tell the customer you'll flag it for staff to call and confirm, then call flag_order_for_staff_review with a plain description of what they asked for. Don't try workarounds like creating a new order for the same items — that would double-charge them.
+
+Always state the GST breakdown when confirming an order — never just say "your total is $X." Say something like "subtotal $A, plus GST $B, comes to $C total" so the customer isn't surprised by the number.`;
 
 const tools = [
   {
@@ -181,6 +185,15 @@ const tools = [
       type: 'object',
       properties: { phone: { type: 'string' } },
       required: ['phone']
+    }
+  },
+  {
+    name: 'flag_order_for_staff_review',
+    description: 'Use this when a customer wants to reduce, remove, or change something on an order that has ALREADY been accepted by the store — this can never be automated safely since the kitchen may already be preparing it. Flags the current order so staff see it and can call the customer to resolve it manually.',
+    input_schema: {
+      type: 'object',
+      properties: { request_description: { type: 'string', description: 'Plain description of what the customer wants changed, for staff to read.' } },
+      required: ['request_description']
     }
   }
 ];
@@ -288,8 +301,38 @@ const GST_RATE = 0.05; // Alberta: 5% federal GST, no provincial sales tax
 // twice in a row with the same list produces the same result both times,
 // instead of compounding (which is what happened when the AI called this
 // twice for the same request — additive deltas turned "add 1" into "add 2").
-async function confirmOrder({ items: fullItems, note }, tenantId, customerId, phoneVerified, existingOrderId) {
+// The AI's confirm_order call includes a price per item, but that number
+// comes from the model's own memory of the conversation — never trust it
+// for anything that gets charged. Always re-look-up the real price (and
+// confirm the item still exists/is active) directly from menu_items.
+async function resolveAuthoritativePrices(items, tenantId) {
+  const ids = items.map((i) => i.menu_item_id);
+  const { data: menuRows, error } = await supabase
+    .from('menu_items')
+    .select('id, name, price, active')
+    .eq('tenant_id', tenantId)
+    .in('id', ids);
+  if (error) throw new Error(error.message);
+
+  const byId = new Map((menuRows || []).map((m) => [m.id, m]));
+  return items.map((item) => {
+    const menuItem = byId.get(item.menu_item_id);
+    if (!menuItem || !menuItem.active) {
+      throw new Error(`${item.name || 'One of those items'} isn't available right now.`);
+    }
+    return { menu_item_id: menuItem.id, name: menuItem.name, qty: item.qty, price: Number(menuItem.price) };
+  });
+}
+
+async function confirmOrder({ items: rawItems, note }, tenantId, customerId, phoneVerified, existingOrderId) {
   if (!phoneVerified) return { error: 'Phone number must be verified before placing an order.' };
+
+  let fullItems;
+  try {
+    fullItems = await resolveAuthoritativePrices(rawItems, tenantId);
+  } catch (err) {
+    return { error: err.message };
+  }
 
   if (existingOrderId) {
     const { data: existing } = await supabase.from('orders').select('*').eq('id', existingOrderId).maybeSingle();
@@ -325,7 +368,11 @@ async function confirmOrder({ items: fullItems, note }, tenantId, customerId, ph
       }
 
       if (diffItems.length === 0) {
-        return { error: "That order's already being prepared and can't be changed — but I can start a new order for anything additional." };
+        return {
+          error: "That order's already being prepared, so nothing can be added — this looks more like a request to reduce or remove something instead.",
+          reduction_requested: true,
+          note_for_ai: 'The customer is trying to reduce/remove from an order that\'s already accepted. Do not attempt this yourself. Tell them you\'ll flag it for staff to call and confirm, then call flag_order_for_staff_review with a clear description of what they want changed.'
+        };
       }
 
       const subtotal = diffItems.reduce((sum, i) => sum + i.qty * i.price, 0);
@@ -419,6 +466,20 @@ async function checkOrderStatus({ phone }, tenantId) {
   return result;
 }
 
+async function flagOrderForReview({ request_description }, existingOrderId, tenantId) {
+  if (!existingOrderId) return { error: 'No current order to flag.' };
+
+  const { data, error } = await supabase
+    .from('orders')
+    .update({ needs_attention: true, attention_note: request_description })
+    .eq('id', existingOrderId)
+    .eq('tenant_id', tenantId)
+    .select()
+    .single();
+  if (error) return { error: error.message };
+  return { flagged: true, order_number: data.order_number };
+}
+
 export default async function handler(req, res) {
   const origin = req.headers.origin;
   // Fix #2: cosmetic only, not the actual gate
@@ -509,6 +570,7 @@ export default async function handler(req, res) {
     if (name === 'search_menu') return searchMenu(input, tenantId);
     if (name === 'suggest_items') return { ok: true, items: input.items };
     if (name === 'check_order_status') return checkOrderStatus(input, tenantId);
+    if (name === 'flag_order_for_staff_review') return flagOrderForReview(input, currentOrderId, tenantId);
     if (name === 'confirm_order') {
       const result = await confirmOrder(input, tenantId, currentCustomerId, currentPhoneVerified, currentOrderId);
       if (result.order_id) currentOrderId = result.order_id;
