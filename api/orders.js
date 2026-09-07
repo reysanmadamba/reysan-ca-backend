@@ -212,7 +212,7 @@ export default async function handler(req, res) {
 Current order state (this is FACT, not something to guess from the conversation):
 ${currentOrderText}
 
-Read the conversation below and figure out what the customer's order should be now. If staff and customer agreed to ADD something, use find_menu_items to resolve it to a real item and price, then call confirm_order with the current order's items PLUS the new one. If they agreed to REMOVE or REDUCE something, call confirm_order with the current order's items minus that change — compute the new full list yourself starting from the current order state above, don't just guess a final quantity.
+Read the conversation below and figure out what the customer's order should be now. If staff and customer agreed to ADD something, use find_menu_items to resolve it to a real item and price, then call confirm_order with the current order's items PLUS the new one. If they agreed to REMOVE or REDUCE something, call confirm_order with the current order's items minus that change — compute the new full list yourself starting from the current order state above, don't just guess a final quantity. If removing everything the customer agreed to remove leaves zero items, call confirm_order with an empty items list — this correctly cancels the order, which is fine and expected when that's what was agreed on.
 
 Never invent menu items or prices — always verify with find_menu_items first if an item is mentioned by name in the conversation and you don't already have its real id/price from the current order state above.
 
@@ -259,7 +259,7 @@ ${transcriptText}`;
             return { items: data };
           }
           if (name === 'confirm_order') {
-            return confirmOrder(input, resolved.tenantId, ctx.customer.id, true, ctx.orderId, ctx.sessionId);
+            return confirmOrder(input, resolved.tenantId, ctx.customer.id, true, ctx.orderId, ctx.sessionId, true);
           }
           return { error: 'Unknown tool' };
         }
