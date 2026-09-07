@@ -98,7 +98,7 @@ Confirming an order — never skip the preview step:
 4. If the customer wants to remove or reduce something: restate the updated full list first ("so that'd bring it down to just one Halo-Halo, total $X — want me to go ahead?") and wait for their yes, exactly like adding something. Never remove or change anything silently.
 5. If confirm_order comes back with new_separate_order: true, the original was already accepted and being prepared — only the genuinely new items became a second order. Tell the customer this as one running tab using the combined_total from the result, and don't do that addition yourself.
 
-Reducing or removing from an order that's already accepted: you can't do this yourself — the kitchen may already be preparing it. If the customer has more than one open order, call check_order_status first to see them all (with items) and identify the specific one they mean — never assume it's whichever order you happened to be discussing most recently, since that can be wrong if they have multiple. Then call flag_order_for_staff_review with that order's order_id and a plain description of what they asked for. Don't try workarounds like creating a new order for the same items — that would double-charge them.
+Reducing or removing from an order that's already accepted: you can't do this yourself — the kitchen may already be preparing it. Just call flag_order_for_staff_review with a plain description of what they asked for — you don't need to look up the order_id yourself first. If the customer has more than one open order, the tool will tell you and give you the list with items so you can immediately retry with the right one specified — you don't need a separate check_order_status call for this. Don't try workarounds like creating a new order for the same items — that would double-charge them.
 
 Always state the GST breakdown when confirming an order — never just say "your total is $X." Say something like "subtotal $A, plus GST $B, comes to $C total" so the customer isn't surprised by the number.`;
 
@@ -192,14 +192,14 @@ const tools = [
   },
   {
     name: 'flag_order_for_staff_review',
-    description: 'Use this when a customer wants to reduce, remove, or change something on an order that has ALREADY been accepted by the store — this can never be automated safely since the kitchen may already be preparing it. You MUST specify which order_id this is about — if the customer has more than one open order, call check_order_status first to see all of them (with their items) and pick the one matching what the customer described. Never guess or assume "whichever order is currently active" — a customer can have more than one at once.',
+    description: 'Use this when a customer wants to reduce, remove, or change something on an order that has ALREADY been accepted by the store — this can never be automated safely since the kitchen may already be preparing it. If the customer has only one open order, you can omit order_id — it\'ll be used automatically. If they have more than one, you MUST specify which one — call check_order_status first to see all of them (with items) and pick the one matching what the customer described. Never guess between multiple open orders.',
     input_schema: {
       type: 'object',
       properties: {
-        order_id: { type: 'string', description: 'The specific order this request is about — get this from check_order_status if there\'s any ambiguity.' },
+        order_id: { type: 'string', description: 'Only needed if the customer has more than one open order — get this from check_order_status.' },
         request_description: { type: 'string', description: 'Plain description of what the customer wants changed, for staff to read.' }
       },
-      required: ['order_id', 'request_description']
+      required: ['request_description']
     }
   },
   {
@@ -370,13 +370,32 @@ async function checkOrderStatus({ phone }, tenantId, contactPhone) {
   return result;
 }
 
-async function flagOrderForReview({ order_id, request_description }, tenantId) {
-  if (!order_id) return { error: 'order_id is required.' };
+async function flagOrderForReview({ order_id, request_description }, tenantId, customerId) {
+  let targetOrderId = order_id;
+
+  if (!targetOrderId) {
+    const { data: openOrders } = await supabase
+      .from('orders')
+      .select('id, order_number, items')
+      .eq('customer_id', customerId)
+      .not('status', 'in', '(completed,cancelled)');
+
+    if (!openOrders || openOrders.length === 0) return { error: 'No open order found for this customer.' };
+    if (openOrders.length === 1) {
+      targetOrderId = openOrders[0].id;
+    } else {
+      return {
+        error: 'This customer has more than one open order — order_id is required.',
+        open_orders: openOrders.map((o) => ({ order_id: o.id, order_number: o.order_number, items: o.items })),
+        note_for_ai: 'Pick the order_id that matches what the customer described, then call flag_order_for_staff_review again with it.'
+      };
+    }
+  }
 
   const { data, error } = await supabase
     .from('orders')
     .update({ needs_attention: true, attention_note: request_description })
-    .eq('id', order_id)
+    .eq('id', targetOrderId)
     .eq('tenant_id', tenantId)
     .select()
     .single();
@@ -544,7 +563,7 @@ export default async function handler(req, res) {
     if (name === 'search_menu') return searchMenu(input, tenantId);
     if (name === 'suggest_items') return { ok: true, items: input.items };
     if (name === 'check_order_status') return checkOrderStatus(input, tenantId, tenant.contactPhone);
-    if (name === 'flag_order_for_staff_review') return flagOrderForReview(input, tenantId);
+    if (name === 'flag_order_for_staff_review') return flagOrderForReview(input, tenantId, currentCustomerId);
     if (name === 'flag_off_topic') {
       currentOffTopicCount += 1;
       return { count: currentOffTopicCount, limit_reached: currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS && !humanRequested };
