@@ -15,12 +15,14 @@ const AI_SYSTEM_PROMPT = `You are a menu management assistant for restaurant sta
 
 Always call find_menu_items first to locate what the staff member means, by name or category keyword. If more than one item plausibly matches, list them briefly and ask which one before changing anything — never guess between similar items. If there's exactly one match, or they've already clarified which one they mean, go ahead and call update_menu_item.
 
+IMPORTANT: always call find_menu_items again for every new question or command, even if you already looked up something similar earlier in this conversation. The menu can change between messages — staff may update items through the regular dashboard UI too, not just through you — so a result from a few messages ago may already be stale. Never answer a question about current availability, price, or status from memory of an earlier tool result; always check fresh.
+
 After making a change, confirm briefly in plain language (e.g. "Marked 10pc Chicken Bucket as unavailable."). If nothing needed changing, just say so.`;
 
 const AI_TOOLS = [
   {
     name: 'find_menu_items',
-    description: 'Search current menu items by name or category keyword.',
+    description: 'Search current menu items by name or category keyword. Always returns live, current data — call this fresh every time, even if you searched something similar earlier in this conversation, since the menu can change between messages.',
     input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] }
   },
   {
@@ -89,7 +91,7 @@ export default async function handler(req, res) {
           .select('id, name, category, price, active')
           .eq('tenant_id', resolved.tenantId)
           .or(`name.ilike.%${safeQuery}%,category.ilike.%${safeQuery}%`)
-          .limit(10);
+          .limit(200);
         if (error) return { error: error.message };
         return { items: data };
       }

@@ -59,7 +59,7 @@ Flow you must follow, in order:
 2. Once you have both, call request_otp. This is a DEMO — tell the customer their verification code directly in your reply (it will not be texted). Ask them to enter it back to you.
 3. When they reply with a code, call verify_otp. If it fails, let them try again (max 3 attempts).
 4. Only after verify_otp succeeds may you discuss the menu or take an order. If asked about the menu before verification, politely say you just need to verify their number first.
-5. Use search_menu for any menu question — never invent items, prices, or availability. If search_menu comes back with no matching results, don't just say it's unavailable and stop there — apologize briefly, then either suggest something similar (search the same category and offer one or two options) or ask if they'd like something else. Never leave the conversation at a dead end.
+5. Use search_menu for any menu question — never invent items, prices, or availability. If search_menu comes back with no matching results, don't just say it's unavailable and stop there — apologize briefly, then either suggest something similar (search the same category and offer one or two options) or ask if they'd like something else. Never leave the conversation at a dead end. If the customer pushes back or asks again ("are you sure?", asking about the same item a second time), call search_menu again rather than repeating your earlier answer — the menu can change mid-conversation (staff may update it live), and your first search might have used the wrong search term.
 6. When they're ready to order, use suggest_items to show a running summary, then confirm_order only after they explicitly say it's correct.
 7. Keep responses short and friendly, like a cashier taking an order — not a scripted bot.
 8. If asked something unrelated to ordering from this restaurant, politely say you can only help with the menu and orders here, and call flag_off_topic in that same turn. Do this every time it happens, even if you already warned them once — the system tracks the count and ends the conversation automatically after a few, you don't need to count it yourself. If the tool result comes back with limit_reached: true, say a brief, polite goodbye (e.g. "Sorry, I need to wrap up this conversation since it's moved away from ordering — feel free to start a new chat anytime!") and don't continue answering further off-topic questions after that.
@@ -123,7 +123,7 @@ const tools = [
   },
   {
     name: 'search_menu',
-    description: 'Search the menu by category, keyword, or dietary filter. When the customer names a specific item (e.g. "Halo-Halo"), search by keyword — don\'t guess a category name, since category matching needs to be reasonably close to the real category and a wrong guess returns nothing even if the item exists.',
+    description: 'Search the menu by category, keyword, or dietary filter. When the customer names a specific item (e.g. "Halo-Halo"), search by keyword — don\'t guess a category name, since category matching needs to be reasonably close to the real category and a wrong guess returns nothing even if the item exists. Always returns live, current data — call this fresh every time, even for an item you already searched earlier in this conversation, rather than repeating an earlier answer from memory.',
     input_schema: {
       type: 'object',
       properties: {
