@@ -108,6 +108,89 @@ export default async function handler(req, res) {
       return res.status(200).json({ customers: data });
     }
 
+    // Summary report — completed/cancelled/no-show counts, revenue, and
+    // top-selling items, for a given date range (from the person's own
+    // local midnight-to-midnight, so it never has to guess a timezone).
+    if (req.query.report === 'true') {
+      const { date_from, date_to } = req.query;
+      if (!date_from || !date_to) return res.status(400).json({ error: 'date_from and date_to are required' });
+
+      const { data: rangeOrders, error: rangeErr } = await supabaseAdmin
+        .from('orders')
+        .select('status, items, total, created_at')
+        .eq('tenant_id', resolved.tenantId)
+        .gte('created_at', date_from)
+        .lt('created_at', date_to);
+      if (rangeErr) return res.status(500).json({ error: rangeErr.message });
+
+      const completed = (rangeOrders || []).filter((o) => o.status === 'completed');
+      const cancelled = (rangeOrders || []).filter((o) => o.status === 'cancelled');
+      const noShow = (rangeOrders || []).filter((o) => o.status === 'no_show');
+      const totalRevenue = completed.reduce((sum, o) => sum + Number(o.total || 0), 0);
+
+      const itemCounts = {};
+      completed.forEach((o) => {
+        (o.items || []).forEach((i) => {
+          itemCounts[i.name] = (itemCounts[i.name] || 0) + i.qty;
+        });
+      });
+      const bestSellers = Object.entries(itemCounts)
+        .map(([name, qty]) => ({ name, qty }))
+        .sort((a, b) => b.qty - a.qty);
+
+      return res.status(200).json({
+        completed_count: completed.length,
+        cancelled_count: cancelled.length,
+        no_show_count: noShow.length,
+        total_revenue: totalRevenue.toFixed(2),
+        best_sellers: bestSellers
+      });
+    }
+
+    // Per-item sales over time, bucketed by day/week/month/quarter/year —
+    // only counts completed orders (actual finished sales).
+    if (req.query.item_report === 'true') {
+      const { item_name, date_from, date_to, granularity } = req.query;
+      if (!item_name || !date_from || !date_to) return res.status(400).json({ error: 'item_name, date_from, and date_to are required' });
+
+      const { data: rangeOrders, error: rangeErr } = await supabaseAdmin
+        .from('orders')
+        .select('items, created_at')
+        .eq('tenant_id', resolved.tenantId)
+        .eq('status', 'completed')
+        .gte('created_at', date_from)
+        .lt('created_at', date_to);
+      if (rangeErr) return res.status(500).json({ error: rangeErr.message });
+
+      const bucketKey = (dateStr) => {
+        const d = new Date(dateStr);
+        const g = granularity || 'day';
+        if (g === 'week') {
+          const jan1 = new Date(d.getFullYear(), 0, 1);
+          const week = Math.ceil(((d - jan1) / 86400000 + jan1.getDay() + 1) / 7);
+          return `${d.getFullYear()}-W${String(week).padStart(2, '0')}`;
+        }
+        if (g === 'month') return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        if (g === 'quarter') return `${d.getFullYear()}-Q${Math.floor(d.getMonth() / 3) + 1}`;
+        if (g === 'year') return String(d.getFullYear());
+        return d.toISOString().slice(0, 10);
+      };
+
+      const buckets = {};
+      (rangeOrders || []).forEach((o) => {
+        const match = (o.items || []).find((i) => i.name === item_name);
+        if (!match) return;
+        const key = bucketKey(o.created_at);
+        buckets[key] = (buckets[key] || 0) + match.qty;
+      });
+
+      const series = Object.entries(buckets)
+        .map(([period, qty]) => ({ period, qty }))
+        .sort((a, b) => a.period.localeCompare(b.period));
+
+      return res.status(200).json({ series, total: series.reduce((sum, s) => sum + s.qty, 0) });
+    }
+
     // Optional day filter for reporting — date_from/date_to are ISO
     // timestamps computed client-side from the staff member's own local
     // midnight-to-midnight, so this never has to guess a timezone.
@@ -402,7 +485,17 @@ ${transcriptText}`;
       });
     }
 
-    return res.status(200).json({ order });
+    let noShowCount;
+    if (status === 'no_show') {
+      const { count } = await supabaseAdmin
+        .from('orders')
+        .select('id', { count: 'exact', head: true })
+        .eq('customer_id', order.customer_id)
+        .eq('status', 'no_show');
+      noShowCount = count;
+    }
+
+    return res.status(200).json({ order, no_show_count: noShowCount });
   }
 
   return res.status(405).json({ error: 'Method not allowed' });

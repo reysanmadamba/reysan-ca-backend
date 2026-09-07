@@ -33,6 +33,7 @@ const ALLOWED_AREA_CODES = ['587', '780']; // Edmonton — soft flag only, never
 
 const MAX_PER_SESSION_PER_HOUR = 20;
 const MAX_OFF_TOPIC_WARNINGS = 3; // after this many, the conversation ends
+const MAX_OTP_REMINDERS = 2; // ask once, remind once, then end if still not provided
 const MAX_PER_IP_PER_HOUR = 40;
 const MAX_GLOBAL_PER_TENANT_PER_HOUR = 500; // fix #3 — the actual spend cap
 const FETCH_TIMEOUT_MS = 10000;
@@ -57,14 +58,14 @@ const SYSTEM_PROMPT = `You are the ordering assistant for a Jollibee Canada loca
 Flow you must follow, in order:
 1. If the customer hasn't given a name and phone number yet, ask for both before anything else.
 2. Once you have both, call request_otp. This is a DEMO — tell the customer their verification code directly in your reply (it will not be texted). Ask them to enter it back to you.
-3. When they reply with a code, call verify_otp. If it fails, let them try again (max 3 attempts). Never announce "your phone is verified!" or similar unless YOU just called verify_otp yourself in this conversation and it succeeded — if the customer is already treated as verified for some other reason (e.g. a staff member already helped them), just proceed naturally without commenting on verification status at all.
+3. When they reply with a code, call verify_otp. If it fails, let them try again (max 3 attempts). Never announce "your phone is verified!" or similar unless YOU just called verify_otp yourself in this conversation and it succeeded — if the customer is already treated as verified for some other reason (e.g. a staff member already helped them), just proceed naturally without commenting on verification status at all. If instead they ignore the code request and talk about something else, remind them ONCE that you need the code to proceed with their order, and call note_otp_reminder_sent. If they still don't provide it after that reminder, the system will end the conversation automatically — just say a brief, polite goodbye if that happens, don't keep asking.
 4. Only after verify_otp succeeds may you discuss the menu or take an order. If asked about the menu before verification, politely say you just need to verify their number first.
 5. Use search_menu for any menu question — never invent items, prices, or availability. If search_menu comes back with no matching results, don't just say it's unavailable and stop there — apologize briefly, then either suggest something similar (search the same category and offer one or two options) or ask if they'd like something else. Never leave the conversation at a dead end. If the customer pushes back or asks again ("are you sure?", asking about the same item a second time), call search_menu again rather than repeating your earlier answer — the menu can change mid-conversation (staff may update it live), and your first search might have used the wrong search term.
 6. When they're ready to order, use suggest_items to show a running summary, then confirm_order only after they explicitly say it's correct.
 7. Keep responses short and friendly, like a cashier taking an order — not a scripted bot.
 8. If asked something unrelated to ordering from this restaurant, politely say you can only help with the menu and orders here, and call flag_off_topic in that same turn. Do this every time it happens, even if you already warned them once — the system tracks the count and ends the conversation automatically after a few, you don't need to count it yourself. If the tool result comes back with limit_reached: true, say a brief, polite goodbye (e.g. "Sorry, I need to wrap up this conversation since it's moved away from ordering — feel free to start a new chat anytime!") and don't continue answering further off-topic questions after that.
 9. Talking to a human is ONLY for when the customer explicitly asks for it — words like "talk to a person/agent/human/staff", "real person", "can I speak to someone". Collecting name and phone is part of EVERY normal order and does not, by itself, mean they want a human — never call flag_wants_human just because you happen to have just gotten their name and phone for an order. If they HAVE explicitly asked: take it seriously right away, at ANY point, even before ordering, even before their OTP code is verified (this does NOT require phone verification — only a name and phone on file, i.e. request_otp has been called at some point, verified or not). Check first: did they already give their name and phone earlier in this conversation? If so, don't ask again — just call flag_wants_human immediately. Only ask for name/phone if you genuinely don't have it yet. If flag_wants_human returns need_identity_first, that means the system doesn't have it either — ask for it then. Once flagged, tell them warmly that a team member will join shortly.
-10. If a conversation about orders is getting genuinely tangled — several open orders, multiple edits, the customer seems confused about what they actually have — offer a reset: ask if they'd like to cancel everything and start fresh, or if they'd rather you just recap what they currently have. If they say yes to resetting, call reset_orders. Its result tells you what actually happened — some orders may have been cancelled outright (still "new", nothing being cooked yet) while others may have only been flagged for staff (already accepted, so a human needs to confirm the cancellation with the kitchen first). Relay this distinction honestly — don't tell them everything is cancelled if some of it is only pending staff confirmation. If they say no to resetting, just recap all their current open orders (use check_order_status) and ask what they'd like to add.
+10. A simple "can I add more?" or "can I change something?" is a NORMAL continuation — never a reason to offer a reset. Just use check_order_status to see what they currently have, then help with the add/change like any other request (e.g. a reduction on an accepted order still goes through flag_order_for_staff_review as usual). Only consider offering a reset when things have gotten genuinely tangled — several separate edits or cancellations have already happened in this same conversation (three or more back-and-forth changes), not just one prior edit. Even then, ask first: "would you like to reset and start fresh, or should I just recap what you currently have?" — don't assume they want a reset. If they say yes, call reset_orders and relay its result honestly (some orders may only get flagged for staff, not cancelled outright, if already accepted — don't claim everything is cancelled when it isn't). If they say no, or a reset was never warranted in the first place, just recap their current open orders and continue normally.
 
 Be a good cashier, not a search box. Real cashiers make conversation and suggest things:
 - If the customer seems unsure what to get, ask a light question first — "feeling like chicken today, or something else?" — instead of just listing the whole menu.
@@ -215,7 +216,12 @@ const tools = [
   },
   {
     name: 'reset_orders',
-    description: 'Cancels and clears the customer\'s open orders so they can start fresh — use this only after they\'ve explicitly agreed to a reset (e.g. you offered "would you like to reset and start over?" and they said yes). Orders still in "new" status are cancelled immediately. Any already-accepted order can\'t be cancelled automatically — those get flagged for staff instead, same as any other change to an accepted order.',
+    description: 'RARE — only use after the customer explicitly agreed to a reset you offered, and only offer that in the first place when several edits/cancellations have already piled up in this conversation. A normal "can I add more?" is NOT a reason to reach for this. Cancels and clears the customer\'s open orders so they can start fresh. Orders still in "new" status are cancelled immediately. Any already-accepted order can\'t be cancelled automatically — those get flagged for staff instead, same as any other change to an accepted order.',
+    input_schema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'note_otp_reminder_sent',
+    description: 'Call this every time you have to remind the customer they still need to provide their verification code, after already asking once. Tracks how many reminders have been sent — after the limit, the system ends the conversation automatically.',
     input_schema: { type: 'object', properties: {} }
   }
 ];
@@ -454,7 +460,7 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const clientIp = getClientIp(req);
-  const { message, history = [], token, customerId, phoneVerified, orderId, offTopicCount } = req.body;
+  const { message, history = [], token, customerId, phoneVerified, orderId, offTopicCount, otpReminderCount } = req.body;
 
   // verify the Turnstile-issued session token before anything else
   const session = verifyToken(token);
@@ -485,6 +491,16 @@ export default async function handler(req, res) {
       reply: "This conversation's been closed since it's moved away from ordering — feel free to refresh and start a new one anytime you'd like to order.",
       conversationEnded: true,
       offTopicCount
+    });
+  }
+
+  // Same for a customer who was asked for their verification code and
+  // never provided it, even after a reminder.
+  if (otpReminderCount >= MAX_OTP_REMINDERS && !humanRequested) {
+    return res.status(200).json({
+      reply: "We weren't able to verify your number, so I have to close this chat for now — feel free to start a new one anytime and we can try again.",
+      conversationEnded: true,
+      otpReminderCount
     });
   }
 
@@ -583,6 +599,7 @@ export default async function handler(req, res) {
   let currentPhoneVerified = phoneVerified || customerState?.phone_verified || false;
   let currentOrderId = orderId || null;
   let currentOffTopicCount = offTopicCount || 0;
+  let currentOtpReminderCount = otpReminderCount || 0;
 
   // Shared dispatcher — same tool execution regardless of which provider
   // asked for it, so behavior can't drift between the two.
@@ -605,6 +622,10 @@ export default async function handler(req, res) {
     if (name === 'flag_off_topic') {
       currentOffTopicCount += 1;
       return { count: currentOffTopicCount, limit_reached: currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS && !humanRequested };
+    }
+    if (name === 'note_otp_reminder_sent') {
+      currentOtpReminderCount += 1;
+      return { count: currentOtpReminderCount, limit_reached: currentOtpReminderCount >= MAX_OTP_REMINDERS && !humanRequested };
     }
     if (name === 'flag_wants_human') {
       if (!currentCustomerId) return { error: 'need_identity_first' };
@@ -676,7 +697,9 @@ export default async function handler(req, res) {
       phoneVerified: currentPhoneVerified,
       orderId: currentOrderId,
       offTopicCount: currentOffTopicCount,
-      conversationEnded: currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS && !humanRequested
+      otpReminderCount: currentOtpReminderCount,
+      conversationEnded:
+        (currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS || currentOtpReminderCount >= MAX_OTP_REMINDERS) && !humanRequested
     });
   } catch (err) {
     console.error('jollibee-chat error', err);
