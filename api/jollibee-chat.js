@@ -64,7 +64,7 @@ Flow you must follow, in order:
 6. When they're ready to order, use suggest_items to show a running summary, then confirm_order only after they explicitly say it's correct. Before confirming a customer's FIRST order in this conversation, ask if they'd like a bag for $0.25 — search_menu for it (keyword "bag") and add it if they say yes. Don't ask again on later additions to the same order or on separate orders later in the conversation — just once, the first time.
 7. Keep responses short and friendly, like a cashier taking an order — not a scripted bot.
 8. If asked something unrelated to ordering from this restaurant, politely say you can only help with the menu and orders here, and call flag_off_topic in that same turn. Do this every time it happens, even if you already warned them once — the system tracks the count and ends the conversation automatically after a few, you don't need to count it yourself. If the tool result comes back with limit_reached: true, say a brief, polite goodbye (e.g. "Sorry, I need to wrap up this conversation since it's moved away from ordering — feel free to start a new chat anytime!") and don't continue answering further off-topic questions after that.
-9. Talking to a human is ONLY for when the customer explicitly asks for it — words like "talk to a person/agent/human/staff", "real person", "can I speak to someone". Collecting name and phone is part of EVERY normal order and does not, by itself, mean they want a human — never call flag_wants_human just because you happen to have just gotten their name and phone for an order. If they HAVE explicitly asked: take it seriously right away, at ANY point, even before ordering, even before their OTP code is verified (this does NOT require phone verification — only a name and phone on file, i.e. request_otp has been called at some point, verified or not). Check first: did they already give their name and phone earlier in this conversation? If so, don't ask again — just call flag_wants_human immediately. Only ask for name/phone if you genuinely don't have it yet. If flag_wants_human returns need_identity_first, that means the system doesn't have it either — ask for it then. Once flagged, tell them warmly that a team member will join shortly.
+9. Talking to a human is ONLY for when the customer explicitly asks for it — words like "talk to a person/agent/human/staff", "real person", "can I speak to someone". Collecting name and phone is part of EVERY normal order and does not, by itself, mean they want a human — never call flag_wants_human just because you happen to have just gotten their name and phone for an order. If they HAVE explicitly asked: take it seriously right away, at ANY point, even before ordering, even before OTP verification. Check first: did they already give their name and phone earlier in this conversation? If so, don't ask again — just call flag_wants_human immediately. If you don't have it yet, ask ONCE — but if they refuse, say they can't, or insist on skipping it ("just connect me", "I can't"), don't ask again — call flag_wants_human anyway. It works without a name or phone; staff can decide from there. Once flagged, tell them warmly that a team member will join shortly.
 10. A simple "can I add more?" or "can I change something?" is a NORMAL continuation — never a reason to offer a reset. Just use check_order_status to see what they currently have, then help with the add/change like any other request (e.g. a reduction on an accepted order still goes through flag_order_for_staff_review as usual). Only consider offering a reset when things have gotten genuinely tangled — several separate edits or cancellations have already happened in this same conversation (three or more back-and-forth changes), not just one prior edit. Even then, ask first: "would you like to reset and start fresh, or should I just recap what you currently have?" — don't assume they want a reset. If they say yes, call reset_orders and relay its result honestly (some orders may only get flagged for staff, not cancelled outright, if already accepted — don't claim everything is cancelled when it isn't). If they say no, or a reset was never warranted in the first place, just recap their current open orders and continue normally.
 
 Be a good cashier, not a search box. Real cashiers make conversation and suggest things:
@@ -211,7 +211,7 @@ const tools = [
   },
   {
     name: 'flag_wants_human',
-    description: 'ONLY call this when the customer has EXPLICITLY asked to talk to a real person, staff, an agent, or a human — words like "talk to a person/agent/human/staff/representative", "real person", "can I speak to someone". Do NOT call this just because you\'re collecting their name and phone for a normal order — that happens for every order and does not mean they asked for a human. If they haven\'t explicitly asked for a human, never call this tool, no matter what else is happening in the conversation. Only if they HAVE explicitly asked, and you don\'t have their name/phone yet, ask for it first, then call this tool once you have it.',
+    description: 'ONLY call this when the customer has EXPLICITLY asked to talk to a real person, staff, an agent, or a human — words like "talk to a person/agent/human/staff/representative", "real person", "can I speak to someone". Do NOT call this just because you\'re collecting their name and phone for a normal order — that happens for every order and does not mean they asked for a human. If they haven\'t explicitly asked for a human, never call this tool, no matter what else is happening in the conversation. Once they HAVE explicitly asked, you can ask for their name and phone once so staff can reach them — but if they refuse or insist on skipping it, don\'t keep pushing; just call this tool anyway. It works without identity info too.',
     input_schema: { type: 'object', properties: {} }
   },
   {
@@ -628,8 +628,24 @@ export default async function handler(req, res) {
       return { count: currentOtpReminderCount, limit_reached: currentOtpReminderCount >= MAX_OTP_REMINDERS && !humanRequested };
     }
     if (name === 'flag_wants_human') {
-      if (!currentCustomerId) return { error: 'need_identity_first' };
-      const { error } = await supabase.from('customers').update({ wants_human: true, last_session_id: session.sessionId }).eq('id', currentCustomerId);
+      let idToUse = currentCustomerId;
+
+      if (!idToUse) {
+        // They're insisting on a human but won't give name/phone — let them
+        // through anyway rather than gatekeeping. Staff just won't be able
+        // to ban this specific request later without a phone number, which
+        // is a real limitation they can weigh themselves case by case.
+        const { data: anon, error: createErr } = await supabase
+          .from('customers')
+          .insert({ tenant_id: tenantId, name: 'Guest (no info given)', phone: null, last_session_id: session.sessionId })
+          .select()
+          .single();
+        if (createErr) return { error: createErr.message };
+        idToUse = anon.id;
+        currentCustomerId = idToUse;
+      }
+
+      const { error } = await supabase.from('customers').update({ wants_human: true, last_session_id: session.sessionId }).eq('id', idToUse);
       if (error) return { error: error.message };
       humanRequested = true;
       return { flagged: true };
