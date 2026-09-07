@@ -437,12 +437,19 @@ export default async function handler(req, res) {
     if (orderId) {
       const { data: order } = await supabase
         .from('orders')
-        .select('status, eta_minutes, accepted_at, total')
+        .select('order_number, status, eta_minutes, accepted_at, total, items')
         .eq('id', orderId)
         .eq('tenant_id', tenantId)
         .maybeSingle();
       if (order) {
-        statusPayload = { status: order.status, eta_minutes: order.eta_minutes, remaining_minutes: computeRemainingMinutes(order), total: order.total };
+        statusPayload = {
+          status: order.status,
+          eta_minutes: order.eta_minutes,
+          remaining_minutes: computeRemainingMinutes(order),
+          total: order.total,
+          order_number: order.order_number,
+          items: order.items
+        };
       }
     }
 
