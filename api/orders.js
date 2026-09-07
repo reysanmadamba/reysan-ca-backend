@@ -182,7 +182,11 @@ export default async function handler(req, res) {
       }
 
       if (takeover_action === 'resume') {
-        await supabaseAdmin.from('customers').update({ takeover_active: false, wants_human: false }).eq('id', ctx.customer.id);
+        // A staff member directly chatting with this person IS the
+        // verification — the OTP gate exists to protect the automated path
+        // when no human is watching, not conversations staff are actively
+        // supervising. Mark them verified so confirm_order doesn't block.
+        await supabaseAdmin.from('customers').update({ takeover_active: false, wants_human: false, phone_verified: true }).eq('id', ctx.customer.id);
 
         const { data: tenantRow } = await supabaseAdmin.from('tenants').select('ai_provider').eq('id', resolved.tenantId).single();
         const provider = tenantRow?.ai_provider || 'claude';
@@ -220,7 +224,7 @@ ${transcriptText}`;
 
         async function runTool(name, input) {
           if (name === 'confirm_order') {
-            return confirmOrder(input, resolved.tenantId, ctx.customer.id, ctx.customer.phone_verified || false, ctx.orderId, ctx.sessionId);
+            return confirmOrder(input, resolved.tenantId, ctx.customer.id, true, ctx.orderId, ctx.sessionId);
           }
           return { error: 'Unknown tool' };
         }

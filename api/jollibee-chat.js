@@ -399,20 +399,33 @@ export default async function handler(req, res) {
   const session = verifyToken(token);
   if (!session) return res.status(401).json({ error: 'Session expired or invalid. Please refresh.' });
 
+  const tenant = await getTenant();
+  if (!tenant) return res.status(500).json({ error: 'Configuration error.' });
+  const tenantId = tenant.id;
+  const activeProvider = tenant.aiProvider; // per-tenant switch, no redeploy needed to change it
+
+  // Fetch the customer's current state once, up front — used to decide
+  // whether they're mid-takeover AND whether the off-topic penalty should
+  // apply at all. Someone who's asked for a human shouldn't get their chat
+  // closed for "going off topic" while they wait — that's backwards.
+  let customerState = null;
+  if (customerId) {
+    const { data } = await supabase.from('customers').select('takeover_active, wants_human').eq('id', customerId).maybeSingle();
+    customerState = data;
+  }
+  let humanRequested = customerState?.wants_human || false;
+
   // Conversation already ended for being off-topic too many times — don't
   // spend a single token on a reply the customer can't act on anyway.
-  if (offTopicCount >= MAX_OFF_TOPIC_WARNINGS) {
+  // Suspended entirely once a human has been requested — waiting for staff
+  // isn't "going off topic."
+  if (offTopicCount >= MAX_OFF_TOPIC_WARNINGS && !humanRequested) {
     return res.status(200).json({
       reply: "This conversation's been closed since it's moved away from ordering — feel free to refresh and start a new one anytime you'd like to order.",
       conversationEnded: true,
       offTopicCount
     });
   }
-
-  const tenant = await getTenant();
-  if (!tenant) return res.status(500).json({ error: 'Configuration error.' });
-  const tenantId = tenant.id;
-  const activeProvider = tenant.aiProvider; // per-tenant switch, no redeploy needed to change it
 
   // Lightweight polling path — the widget calls this every ~15s. Message
   // checking works from the moment a session exists (no order needed, so a
@@ -458,24 +471,16 @@ export default async function handler(req, res) {
   // If staff has taken over THIS CUSTOMER's conversation (not tied to any
   // specific order — a customer can ask for a human before ever ordering),
   // log their message for staff to see and skip the AI entirely.
-  if (customerId) {
-    const { data: activeCustomer } = await supabase
-      .from('customers')
-      .select('takeover_active')
-      .eq('id', customerId)
-      .maybeSingle();
-
-    if (activeCustomer?.takeover_active) {
-      await supabase.from('conversation_messages').insert({
-        tenant_id: tenantId,
-        session_id: session.sessionId,
-        customer_id: customerId,
-        order_id: orderId || null,
-        sender: 'customer',
-        message
-      });
-      return res.status(200).json({ reply: null, takeoverActive: true, customerId, phoneVerified, orderId, offTopicCount });
-    }
+  if (customerState?.takeover_active) {
+    await supabase.from('conversation_messages').insert({
+      tenant_id: tenantId,
+      session_id: session.sessionId,
+      customer_id: customerId,
+      order_id: orderId || null,
+      sender: 'customer',
+      message
+    });
+    return res.status(200).json({ reply: null, takeoverActive: true, customerId, phoneVerified, orderId, offTopicCount });
   }
 
   // Fix #9: ban check uses the corrected IP from fix #1
@@ -530,12 +535,13 @@ export default async function handler(req, res) {
     if (name === 'flag_order_for_staff_review') return flagOrderForReview(input, currentOrderId, tenantId);
     if (name === 'flag_off_topic') {
       currentOffTopicCount += 1;
-      return { count: currentOffTopicCount, limit_reached: currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS };
+      return { count: currentOffTopicCount, limit_reached: currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS && !humanRequested };
     }
     if (name === 'flag_wants_human') {
       if (!currentCustomerId) return { error: 'need_identity_first' };
       const { error } = await supabase.from('customers').update({ wants_human: true, last_session_id: session.sessionId }).eq('id', currentCustomerId);
       if (error) return { error: error.message };
+      humanRequested = true;
       return { flagged: true };
     }
     if (name === 'confirm_order') {
@@ -574,7 +580,7 @@ export default async function handler(req, res) {
       phoneVerified: currentPhoneVerified,
       orderId: currentOrderId,
       offTopicCount: currentOffTopicCount,
-      conversationEnded: currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS
+      conversationEnded: currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS && !humanRequested
     });
   } catch (err) {
     console.error('jollibee-chat error', err);
