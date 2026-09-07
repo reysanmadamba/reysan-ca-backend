@@ -194,17 +194,26 @@ export default async function handler(req, res) {
         const fullConversation = await fetchMergedConversation(resolved.tenantId, ctx.sessionId, ctx.customer.id);
         const transcriptText = fullConversation.map((m) => `${m.sender.toUpperCase()}: ${m.message}`).join('\n');
 
-        // Give the AI the order's ACTUAL current contents as structured
-        // fact, not something to infer from conversation text. Without
-        // this, "cancel one" or "yup" to a staff question has no concrete
-        // starting point to compute a new total from.
-        let currentOrderText = 'No order exists yet for this conversation.';
-        if (ctx.orderId) {
-          const { data: existingOrder } = await supabaseAdmin.from('orders').select('order_number, items, total, status').eq('id', ctx.orderId).single();
-          if (existingOrder) {
-            const itemLines = existingOrder.items.map((i) => `- ${i.qty}x ${i.name} ($${i.price} each)`).join('\n');
-            currentOrderText = `Order #${existingOrder.order_number} (status: ${existingOrder.status}) currently contains:\n${itemLines}\nCurrent total: $${existingOrder.total}`;
-          }
+        // A takeover doesn't always start from a specific order card (e.g.
+        // "any real person here?" starts from the customer directly, no
+        // order attached) — so never assume there's at most one order.
+        // Fetch every open order and show the AI all of them with their
+        // real ids, so it can correctly target whichever one the
+        // conversation was actually about.
+        const { data: openOrders } = await supabaseAdmin
+          .from('orders')
+          .select('id, order_number, items, total, status')
+          .eq('customer_id', ctx.customer.id)
+          .not('status', 'in', '(completed,cancelled)');
+
+        let currentOrderText = 'No open orders exist yet for this customer.';
+        if (openOrders && openOrders.length > 0) {
+          currentOrderText = openOrders
+            .map((o) => {
+              const itemLines = o.items.map((i) => `  - ${i.qty}x ${i.name} ($${i.price} each)`).join('\n');
+              return `Order #${o.order_number} (order_id: ${o.id}, status: ${o.status}) currently contains:\n${itemLines}\n  Current total: $${o.total}`;
+            })
+            .join('\n\n');
         }
 
         const FINALIZE_SYSTEM_PROMPT = `You are finalizing a food order after a staff member helped the customer during a live handoff.
@@ -212,7 +221,7 @@ export default async function handler(req, res) {
 Current order state (this is FACT, not something to guess from the conversation):
 ${currentOrderText}
 
-Read the conversation below and figure out what the customer's order should be now. If staff and customer agreed to ADD something, use find_menu_items to resolve it to a real item and price, then call confirm_order with the current order's items PLUS the new one. If they agreed to REMOVE or REDUCE something, call confirm_order with the current order's items minus that change — compute the new full list yourself starting from the current order state above, don't just guess a final quantity. If removing everything the customer agreed to remove leaves zero items, call confirm_order with an empty items list — this correctly cancels the order, which is fine and expected when that's what was agreed on.
+Read the conversation below and figure out what the customer's order should be now. If there's more than one open order listed above, figure out from the conversation WHICH one is being discussed and pass its order_id to confirm_order — never guess if it's ambiguous, and never assume it's the only one. If staff and customer agreed to ADD something, use find_menu_items to resolve it to a real item and price, then call confirm_order with that order's items PLUS the new one. If they agreed to REMOVE or REDUCE something, call confirm_order with that order's items minus that change — compute the new full list yourself starting from the current order state above, don't just guess a final quantity. If removing everything the customer agreed to remove leaves zero items, call confirm_order with an empty items list — this correctly cancels the order, which is fine and expected when that's what was agreed on. If there are NO open orders and the conversation agreed on a brand new order, call confirm_order without an order_id to create one.
 
 Never invent menu items or prices — always verify with find_menu_items first if an item is mentioned by name in the conversation and you don't already have its real id/price from the current order state above.
 
@@ -229,10 +238,11 @@ ${transcriptText}`;
           },
           {
             name: 'confirm_order',
-            description: 'Finalize the order with the FULL current item list — not just what changed. Safe to call even if nothing actually needs to change.',
+            description: 'Finalize an order with its FULL current item list — not just what changed. If there is more than one open order, you must specify order_id — see the current order state above for the correct one. Omit order_id only if there\'s exactly one open order, or none at all (creates a new one).',
             input_schema: {
               type: 'object',
               properties: {
+                order_id: { type: 'string', description: 'Required if more than one order is open. Get this from the current order state above.' },
                 items: {
                   type: 'array',
                   items: {
@@ -259,7 +269,17 @@ ${transcriptText}`;
             return { items: data };
           }
           if (name === 'confirm_order') {
-            return confirmOrder(input, resolved.tenantId, ctx.customer.id, true, ctx.orderId, ctx.sessionId, true);
+            let targetOrderId = input.order_id || null;
+            if (!targetOrderId && openOrders && openOrders.length === 1) {
+              targetOrderId = openOrders[0].id;
+            } else if (!targetOrderId && openOrders && openOrders.length > 1) {
+              return {
+                error: 'More than one order is open — order_id is required.',
+                open_orders: openOrders.map((o) => ({ order_id: o.id, order_number: o.order_number, items: o.items }))
+              };
+            }
+            const { order_id: _drop, ...orderInput } = input;
+            return confirmOrder(orderInput, resolved.tenantId, ctx.customer.id, true, targetOrderId, ctx.sessionId, true);
           }
           return { error: 'Unknown tool' };
         }

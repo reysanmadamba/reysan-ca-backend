@@ -64,6 +64,7 @@ Flow you must follow, in order:
 7. Keep responses short and friendly, like a cashier taking an order — not a scripted bot.
 8. If asked something unrelated to ordering from this restaurant, politely say you can only help with the menu and orders here, and call flag_off_topic in that same turn. Do this every time it happens, even if you already warned them once — the system tracks the count and ends the conversation automatically after a few, you don't need to count it yourself. If the tool result comes back with limit_reached: true, say a brief, polite goodbye (e.g. "Sorry, I need to wrap up this conversation since it's moved away from ordering — feel free to start a new chat anytime!") and don't continue answering further off-topic questions after that.
 9. Talking to a human is ONLY for when the customer explicitly asks for it — words like "talk to a person/agent/human/staff", "real person", "can I speak to someone". Collecting name and phone is part of EVERY normal order and does not, by itself, mean they want a human — never call flag_wants_human just because you happen to have just gotten their name and phone for an order. If they HAVE explicitly asked: take it seriously right away, at ANY point, even before ordering, even before their OTP code is verified (this does NOT require phone verification — only a name and phone on file, i.e. request_otp has been called at some point, verified or not). Check first: did they already give their name and phone earlier in this conversation? If so, don't ask again — just call flag_wants_human immediately. Only ask for name/phone if you genuinely don't have it yet. If flag_wants_human returns need_identity_first, that means the system doesn't have it either — ask for it then. Once flagged, tell them warmly that a team member will join shortly.
+10. If a conversation about orders is getting genuinely tangled — several open orders, multiple edits, the customer seems confused about what they actually have — offer a reset: ask if they'd like to cancel everything and start fresh, or if they'd rather you just recap what they currently have. If they say yes to resetting, call reset_orders. Its result tells you what actually happened — some orders may have been cancelled outright (still "new", nothing being cooked yet) while others may have only been flagged for staff (already accepted, so a human needs to confirm the cancellation with the kitchen first). Relay this distinction honestly — don't tell them everything is cancelled if some of it is only pending staff confirmation. If they say no to resetting, just recap all their current open orders (use check_order_status) and ask what they'd like to add.
 
 Be a good cashier, not a search box. Real cashiers make conversation and suggest things:
 - If the customer seems unsure what to get, ask a light question first — "feeling like chicken today, or something else?" — instead of just listing the whole menu.
@@ -210,6 +211,11 @@ const tools = [
   {
     name: 'flag_wants_human',
     description: 'ONLY call this when the customer has EXPLICITLY asked to talk to a real person, staff, an agent, or a human — words like "talk to a person/agent/human/staff/representative", "real person", "can I speak to someone". Do NOT call this just because you\'re collecting their name and phone for a normal order — that happens for every order and does not mean they asked for a human. If they haven\'t explicitly asked for a human, never call this tool, no matter what else is happening in the conversation. Only if they HAVE explicitly asked, and you don\'t have their name/phone yet, ask for it first, then call this tool once you have it.',
+    input_schema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'reset_orders',
+    description: 'Cancels and clears the customer\'s open orders so they can start fresh — use this only after they\'ve explicitly agreed to a reset (e.g. you offered "would you like to reset and start over?" and they said yes). Orders still in "new" status are cancelled immediately. Any already-accepted order can\'t be cancelled automatically — those get flagged for staff instead, same as any other change to an accepted order.',
     input_schema: { type: 'object', properties: {} }
   }
 ];
@@ -403,6 +409,37 @@ async function flagOrderForReview({ order_id, request_description }, tenantId, c
   return { flagged: true, order_number: data.order_number };
 }
 
+async function resetOrders(tenantId, customerId) {
+  const { data: openOrders } = await supabase
+    .from('orders')
+    .select('id, order_number, status')
+    .eq('customer_id', customerId)
+    .eq('tenant_id', tenantId)
+    .not('status', 'in', '(completed,cancelled)');
+
+  if (!openOrders || openOrders.length === 0) return { ok: true, cancelled: [], flagged_for_staff: [] };
+
+  const cancelled = [];
+  const flaggedForStaff = [];
+
+  for (const order of openOrders) {
+    if (order.status === 'new') {
+      const { error } = await supabase.from('orders').update({ status: 'cancelled' }).eq('id', order.id);
+      if (!error) cancelled.push(order.order_number);
+    } else {
+      // Already accepted — same rule as everywhere else: can't cancel
+      // automatically, needs a human to confirm with the kitchen.
+      const { error } = await supabase
+        .from('orders')
+        .update({ needs_attention: true, attention_note: 'Customer asked to reset/start over — please confirm cancellation with them.' })
+        .eq('id', order.id);
+      if (!error) flaggedForStaff.push(order.order_number);
+    }
+  }
+
+  return { ok: true, cancelled, flagged_for_staff: flaggedForStaff };
+}
+
 export default async function handler(req, res) {
   const origin = req.headers.origin;
   // Fix #2: cosmetic only, not the actual gate
@@ -564,6 +601,7 @@ export default async function handler(req, res) {
     if (name === 'suggest_items') return { ok: true, items: input.items };
     if (name === 'check_order_status') return checkOrderStatus(input, tenantId, tenant.contactPhone);
     if (name === 'flag_order_for_staff_review') return flagOrderForReview(input, tenantId, currentCustomerId);
+    if (name === 'reset_orders') return resetOrders(tenantId, currentCustomerId);
     if (name === 'flag_off_topic') {
       currentOffTopicCount += 1;
       return { count: currentOffTopicCount, limit_reached: currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS && !humanRequested };
