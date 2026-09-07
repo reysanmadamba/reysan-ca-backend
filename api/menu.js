@@ -10,10 +10,13 @@ import { supabaseAdmin, verifyAuth, resolveTenantId } from '../lib/auth-check.js
 import { runClaudeLoop, runOpenAiLoop } from '../lib/llm.js';
 
 const ALLOWED_ORIGINS = ['https://reysan.ca'];
+const MAX_OFF_TOPIC = 3; // after this many, the chat disables itself
 
 const AI_SYSTEM_PROMPT = `You are a menu management assistant for restaurant staff using an internal dashboard — not a customer-facing assistant, so you can be direct and brief.
 
 Reply in plain text only — no markdown (no **, no #, no numbered-list dots run into a paragraph). When listing multiple items, put each one on its own line with an actual line break, not "1. X 2. Y" crammed together.
+
+If the staff member asks something unrelated to menu management, say so briefly and call flag_off_topic in the same turn. If the tool result comes back with limit_reached: true, say a brief goodbye and don't continue.
 
 Always call find_menu_items first to locate what the staff member means, by name or category keyword. If more than one item plausibly matches, list them briefly and ask which one before changing anything — never guess between similar items. If there's exactly one match, or they've already clarified which one they mean, go ahead and call update_menu_item.
 
@@ -85,6 +88,11 @@ const AI_TOOLS = [
       },
       required: ['category', 'name', 'price']
     }
+  },
+  {
+    name: 'flag_off_topic',
+    description: 'Call this every time the staff member asks something unrelated to managing the menu (general chit-chat, unrelated topics). Call it in the same turn as your reply. After a few of these, the system disables the chat automatically.',
+    input_schema: { type: 'object', properties: {} }
   }
 ];
 
@@ -114,7 +122,17 @@ export default async function handler(req, res) {
   }
 
   if (req.method === 'POST' && req.body.ai_command) {
-    const { ai_command, tenant_id, history: clientHistory = [] } = req.body;
+    const { ai_command, tenant_id, history: clientHistory = [], off_topic_count } = req.body;
+    let offTopicCount = off_topic_count || 0;
+
+    if (offTopicCount >= MAX_OFF_TOPIC) {
+      return res.status(200).json({
+        reply: "This chat's been disabled since it moved away from menu management — refresh the page to start a new one.",
+        conversationEnded: true,
+        off_topic_count: offTopicCount
+      });
+    }
+
     const resolved = resolveTenantId(auth, tenant_id);
     if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
 
@@ -123,6 +141,10 @@ export default async function handler(req, res) {
     const openaiTools = AI_TOOLS.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
 
     async function runTool(name, input) {
+      if (name === 'flag_off_topic') {
+        offTopicCount += 1;
+        return { count: offTopicCount, limit_reached: offTopicCount >= MAX_OFF_TOPIC };
+      }
       if (name === 'find_menu_items') {
         // Strip characters that would break PostgREST's .or() filter syntax —
         // this is a staff-only tool, but sanitizing cheaply avoids a
@@ -206,7 +228,12 @@ export default async function handler(req, res) {
         provider === 'openai'
           ? await runOpenAiLoop(messages, runTool, { model: 'gpt-4o-mini', systemPrompt: AI_SYSTEM_PROMPT, tools: openaiTools, maxTokens: 4096 })
           : await runClaudeLoop(messages, runTool, { model: 'claude-haiku-4-5-20251001', systemPrompt: AI_SYSTEM_PROMPT, tools: AI_TOOLS, maxTokens: 4096 });
-      return res.status(200).json({ reply: result.text, history: messages });
+      return res.status(200).json({
+        reply: result.text,
+        history: messages,
+        off_topic_count: offTopicCount,
+        conversationEnded: offTopicCount >= MAX_OFF_TOPIC
+      });
     } catch (err) {
       return res.status(500).json({ error: err.message });
     }

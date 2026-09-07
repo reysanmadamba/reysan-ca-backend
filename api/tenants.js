@@ -168,6 +168,16 @@ export default async function handler(req, res) {
         return res.status(200).json({ total_revenue: totalRevenue.toFixed(2), payment_count: (payments || []).length, monthly });
       }
 
+      if (req.query.subscription_history === 'true') {
+        const { data, error } = await supabaseAdmin
+          .from('tenant_subscription_history')
+          .select('*')
+          .eq('tenant_id', req.query.tenant_id)
+          .order('created_at', { ascending: false });
+        if (error) return res.status(500).json({ error: error.message });
+        return res.status(200).json({ history: data });
+      }
+
       if (req.query.include_inactive === 'true') {
         const { data, error } = await supabaseAdmin.from('tenants').select('*').order('created_at', { ascending: false });
         if (error) return res.status(500).json({ error: error.message });
@@ -279,6 +289,27 @@ export default async function handler(req, res) {
           const { error: payErr } = await supabaseAdmin.from('subscription_payments').insert({ tenant_id, amount: payment_amount, note: note || 'Custom subscription' });
           if (payErr) return res.status(500).json({ error: payErr.message });
         }
+        return res.status(200).json({ tenant: data });
+      }
+
+      // Deactivating resets the tier to trial — a deactivated tenant
+      // shouldn't sit there looking like a paying "pro" account.
+      if (req.body.deactivate_tenant) {
+        const { tenant_id, note } = req.body.deactivate_tenant;
+        const { data, error } = await supabaseAdmin.from('tenants').update({ active: false, subscription_tier: 'trial' }).eq('id', tenant_id).select().single();
+        if (error) return res.status(500).json({ error: error.message });
+        await supabaseAdmin.from('tenant_subscription_history').insert({ tenant_id, event_type: 'deactivated', tier: 'trial', note: note || null });
+        return res.status(200).json({ tenant: data });
+      }
+
+      // Reactivating requires picking a tier explicitly rather than
+      // silently resuming whatever it happened to be before.
+      if (req.body.reactivate_tenant) {
+        const { tenant_id, tier, note } = req.body.reactivate_tenant;
+        if (!tier) return res.status(400).json({ error: 'tier is required to reactivate' });
+        const { data, error } = await supabaseAdmin.from('tenants').update({ active: true, subscription_tier: tier }).eq('id', tenant_id).select().single();
+        if (error) return res.status(500).json({ error: error.message });
+        await supabaseAdmin.from('tenant_subscription_history').insert({ tenant_id, event_type: 'activated', tier, note: note || null });
         return res.status(200).json({ tenant: data });
       }
 
