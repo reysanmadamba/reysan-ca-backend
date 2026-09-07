@@ -15,6 +15,8 @@ const AI_SYSTEM_PROMPT = `You are a menu management assistant for restaurant sta
 
 Always call find_menu_items first to locate what the staff member means, by name or category keyword. If more than one item plausibly matches, list them briefly and ask which one before changing anything — never guess between similar items. If there's exactly one match, or they've already clarified which one they mean, go ahead and call update_menu_item.
 
+For anything involving "all", "everything", or a long list of items — e.g. "mark everything unavailable", "activate the whole menu", "make everything available except the 10pc bucket" — use bulk_set_availability instead of calling update_menu_item many times. It's one reliable operation regardless of how many items there are.
+
 IMPORTANT: always call find_menu_items again for every new question or command, even if you already looked up something similar earlier in this conversation. The menu can change between messages — staff may update items through the regular dashboard UI too, not just through you — so a result from a few messages ago may already be stale. Never answer a question about current availability, price, or status from memory of an earlier tool result; always check fresh.
 
 After making a change, confirm briefly in plain language (e.g. "Marked 10pc Chicken Bucket as unavailable."). If nothing needed changing, just say so.`;
@@ -27,7 +29,7 @@ const AI_TOOLS = [
   },
   {
     name: 'update_menu_item',
-    description: 'Update a menu item. Only include the fields actually being changed.',
+    description: 'Update a single menu item. Only include the fields actually being changed.',
     input_schema: {
       type: 'object',
       properties: {
@@ -41,6 +43,26 @@ const AI_TOOLS = [
         veg: { type: 'boolean' }
       },
       required: ['item_id']
+    }
+  },
+  {
+    name: 'bulk_set_availability',
+    description: 'Set availability for the WHOLE menu at once. Use this instead of calling update_menu_item once per item for anything involving "all", "everything", or a long list — it\'s one operation regardless of menu size, so it can\'t get cut off partway through like many individual calls could. Example: "make everything available except the 10pc Chicken Bucket" -> default_active: true, exceptions: [{item_id: "<10pc bucket id>", active: false}].',
+    input_schema: {
+      type: 'object',
+      properties: {
+        default_active: { type: 'boolean', description: 'What to set every item to, unless listed in exceptions.' },
+        exceptions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { item_id: { type: 'string' }, active: { type: 'boolean' } },
+            required: ['item_id', 'active']
+          },
+          description: 'Items that should get a different value than default_active.'
+        }
+      },
+      required: ['default_active']
     }
   }
 ];
@@ -111,6 +133,24 @@ export default async function handler(req, res) {
         if (error) return { error: error.message };
         return { updated: data };
       }
+      if (name === 'bulk_set_availability') {
+        const { default_active, exceptions = [] } = input;
+        const { error: bulkErr } = await supabaseAdmin
+          .from('menu_items')
+          .update({ active: default_active })
+          .eq('tenant_id', resolved.tenantId);
+        if (bulkErr) return { error: bulkErr.message };
+
+        for (const ex of exceptions) {
+          const { error: exErr } = await supabaseAdmin
+            .from('menu_items')
+            .update({ active: ex.active })
+            .eq('id', ex.item_id)
+            .eq('tenant_id', resolved.tenantId);
+          if (exErr) return { error: exErr.message };
+        }
+        return { ok: true, default_active, exceptions_applied: exceptions.length };
+      }
       return { error: 'Unknown tool' };
     }
 
@@ -118,8 +158,8 @@ export default async function handler(req, res) {
     try {
       const result =
         provider === 'openai'
-          ? await runOpenAiLoop(messages, runTool, { model: 'gpt-4o-mini', systemPrompt: AI_SYSTEM_PROMPT, tools: openaiTools })
-          : await runClaudeLoop(messages, runTool, { model: 'claude-haiku-4-5-20251001', systemPrompt: AI_SYSTEM_PROMPT, tools: AI_TOOLS });
+          ? await runOpenAiLoop(messages, runTool, { model: 'gpt-4o-mini', systemPrompt: AI_SYSTEM_PROMPT, tools: openaiTools, maxTokens: 4096 })
+          : await runClaudeLoop(messages, runTool, { model: 'claude-haiku-4-5-20251001', systemPrompt: AI_SYSTEM_PROMPT, tools: AI_TOOLS, maxTokens: 4096 });
       return res.status(200).json({ reply: result.text, history: messages });
     } catch (err) {
       return res.status(500).json({ error: err.message });
