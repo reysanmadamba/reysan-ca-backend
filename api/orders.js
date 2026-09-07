@@ -216,7 +216,7 @@ Read the conversation below and figure out what the customer's order should be n
 
 Never invent menu items or prices — always verify with find_menu_items first if an item is mentioned by name in the conversation and you don't already have its real id/price from the current order state above.
 
-After calling confirm_order (or deciding no change is actually needed), write a short, friendly closing message stating the final total and mentioning GST. If no order was agreed on at all (e.g. the customer only asked a question), don't call confirm_order — just write a short, friendly reply instead.
+After calling confirm_order, your closing message MUST state the exact total from confirm_order's returned result — never compute or restate a total from your own reading of the conversation, since that's how mismatches between what you say and what actually got placed happen. If no change was agreed on at all (e.g. the customer only asked a question), don't call confirm_order — just write a short, friendly reply instead.
 
 Conversation:
 ${transcriptText}`;

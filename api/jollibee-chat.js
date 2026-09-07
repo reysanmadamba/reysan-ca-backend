@@ -552,9 +552,36 @@ export default async function handler(req, res) {
     return { error: 'Unknown tool' };
   }
 
+  // Build the actual system prompt used for THIS call — the static prompt
+  // plus fresh facts pulled straight from the database. This exists so the
+  // AI never has to rely on its own (possibly incomplete) memory of the
+  // conversation for things like "is this customer verified" — especially
+  // important after a staff takeover, where verification can happen
+  // through a path the AI never itself witnessed.
+  let dynamicSystemPrompt = SYSTEM_PROMPT;
+  if (customerId) {
+    let factsNote = `\n\nKnown facts about this customer, pulled fresh from the database — trust this over your own memory of the conversation, since some of this may have happened outside what you can see (e.g. a staff member verifying them directly):\n- Phone verified: ${customerState?.phone_verified ? 'YES — do not ask for or mention verification again' : 'not yet'}`;
+
+    const { data: recentOrder } = await supabase
+      .from('orders')
+      .select('order_number, items, total, status')
+      .eq('customer_id', customerId)
+      .not('status', 'in', '(completed,cancelled)')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (recentOrder) {
+      const itemsSummary = recentOrder.items.map((i) => `${i.qty}x ${i.name}`).join(', ');
+      factsNote += `\n- Most recent open order: #${recentOrder.order_number} (${recentOrder.status}) — ${itemsSummary}, total $${recentOrder.total}`;
+    } else {
+      factsNote += `\n- No open orders currently.`;
+    }
+    dynamicSystemPrompt = SYSTEM_PROMPT + factsNote;
+  }
+
   try {
     const { text: replyText, inputTokens, outputTokens } =
-      activeProvider === 'openai' ? await runOpenAiLoop(messages, runTool) : await runClaudeLoop(messages, runTool);
+      activeProvider === 'openai' ? await runOpenAiLoop(messages, runTool, dynamicSystemPrompt) : await runClaudeLoop(messages, runTool, dynamicSystemPrompt);
 
     const pricing = PRICING[activeProvider] || PRICING[AI_PROVIDER_DEFAULT];
     const costUsd = inputTokens * pricing.input + outputTokens * pricing.output;
@@ -602,8 +629,8 @@ async function bumpRateLimit(key, windowSeconds) {
 // so the caller can persist it as history for the next request. Also
 // accumulates usage across every API call in the loop (a single user
 // message can trigger several round trips if tools are chained).
-async function runClaudeLoop(messages, runTool) {
-  let response = await callClaude(messages);
+async function runClaudeLoop(messages, runTool, systemPrompt) {
+  let response = await callClaude(messages, systemPrompt);
   let inputTokens = response.usage?.input_tokens || 0;
   let outputTokens = response.usage?.output_tokens || 0;
 
@@ -618,7 +645,7 @@ async function runClaudeLoop(messages, runTool) {
 
     messages.push({ role: 'assistant', content: response.content });
     messages.push({ role: 'user', content: toolResultBlocks });
-    response = await callClaude(messages);
+    response = await callClaude(messages, systemPrompt);
     inputTokens += response.usage?.input_tokens || 0;
     outputTokens += response.usage?.output_tokens || 0;
   }
@@ -631,8 +658,8 @@ async function runClaudeLoop(messages, runTool) {
 // OpenAI loop — mutates `messages` in place too, but in OpenAI's flatter
 // { role, content, tool_calls } shape, which is NOT interchangeable with
 // Claude's block format above. Don't mix history between providers mid-session.
-async function runOpenAiLoop(messages, runTool) {
-  let data = await callOpenAI(messages);
+async function runOpenAiLoop(messages, runTool, systemPrompt) {
+  let data = await callOpenAI(messages, systemPrompt);
   let message = data.choices[0].message;
   let inputTokens = data.usage?.prompt_tokens || 0;
   let outputTokens = data.usage?.completion_tokens || 0;
@@ -646,7 +673,7 @@ async function runOpenAiLoop(messages, runTool) {
       messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
     }
 
-    data = await callOpenAI(messages);
+    data = await callOpenAI(messages, systemPrompt);
     message = data.choices[0].message;
     inputTokens += data.usage?.prompt_tokens || 0;
     outputTokens += data.usage?.completion_tokens || 0;
@@ -658,7 +685,7 @@ async function runOpenAiLoop(messages, runTool) {
 
 // Fix #7 + #8: timeout on the upstream call, and check response.ok before
 // trusting the shape of the body (data.content might not exist on an error)
-async function callClaude(messages) {
+async function callClaude(messages, systemPrompt) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
@@ -670,7 +697,7 @@ async function callClaude(messages) {
         'x-api-key': process.env.ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01'
       },
-      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1024, system: SYSTEM_PROMPT, tools, messages }),
+      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1024, system: systemPrompt, tools, messages }),
       signal: controller.signal
     });
 
@@ -688,7 +715,7 @@ async function callClaude(messages) {
 }
 
 // Same fixes (#7 timeout, #8 safe error parsing) applied to the OpenAI branch.
-async function callOpenAI(messages) {
+async function callOpenAI(messages, systemPrompt) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
@@ -701,7 +728,7 @@ async function callOpenAI(messages) {
       },
       body: JSON.stringify({
         model: OPENAI_MODEL,
-        messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
+        messages: [{ role: 'system', content: systemPrompt }, ...messages],
         tools: openaiTools,
         tool_choice: 'auto'
       }),
