@@ -57,7 +57,7 @@ const SYSTEM_PROMPT = `You are the ordering assistant for a Jollibee Canada loca
 Flow you must follow, in order:
 1. If the customer hasn't given a name and phone number yet, ask for both before anything else.
 2. Once you have both, call request_otp. This is a DEMO — tell the customer their verification code directly in your reply (it will not be texted). Ask them to enter it back to you.
-3. When they reply with a code, call verify_otp. If it fails, let them try again (max 3 attempts).
+3. When they reply with a code, call verify_otp. If it fails, let them try again (max 3 attempts). Never announce "your phone is verified!" or similar unless YOU just called verify_otp yourself in this conversation and it succeeded — if the customer is already treated as verified for some other reason (e.g. a staff member already helped them), just proceed naturally without commenting on verification status at all.
 4. Only after verify_otp succeeds may you discuss the menu or take an order. If asked about the menu before verification, politely say you just need to verify their number first.
 5. Use search_menu for any menu question — never invent items, prices, or availability. If search_menu comes back with no matching results, don't just say it's unavailable and stop there — apologize briefly, then either suggest something similar (search the same category and offer one or two options) or ask if they'd like something else. Never leave the conversation at a dead end. If the customer pushes back or asks again ("are you sure?", asking about the same item a second time), call search_menu again rather than repeating your earlier answer — the menu can change mid-conversation (staff may update it live), and your first search might have used the wrong search term.
 6. When they're ready to order, use suggest_items to show a running summary, then confirm_order only after they explicitly say it's correct.
@@ -410,7 +410,7 @@ export default async function handler(req, res) {
   // closed for "going off topic" while they wait — that's backwards.
   let customerState = null;
   if (customerId) {
-    const { data } = await supabase.from('customers').select('takeover_active, wants_human').eq('id', customerId).maybeSingle();
+    const { data } = await supabase.from('customers').select('takeover_active, wants_human, phone_verified').eq('id', customerId).maybeSingle();
     customerState = data;
   }
   let humanRequested = customerState?.wants_human || false;
@@ -437,12 +437,12 @@ export default async function handler(req, res) {
     if (orderId) {
       const { data: order } = await supabase
         .from('orders')
-        .select('status, eta_minutes, accepted_at')
+        .select('status, eta_minutes, accepted_at, total')
         .eq('id', orderId)
         .eq('tenant_id', tenantId)
         .maybeSingle();
       if (order) {
-        statusPayload = { status: order.status, eta_minutes: order.eta_minutes, remaining_minutes: computeRemainingMinutes(order) };
+        statusPayload = { status: order.status, eta_minutes: order.eta_minutes, remaining_minutes: computeRemainingMinutes(order), total: order.total };
       }
     }
 
@@ -512,7 +512,7 @@ export default async function handler(req, res) {
 
   const messages = [...history, { role: 'user', content: message }];
   let currentCustomerId = customerId || null;
-  let currentPhoneVerified = phoneVerified || false;
+  let currentPhoneVerified = phoneVerified || customerState?.phone_verified || false;
   let currentOrderId = orderId || null;
   let currentOffTopicCount = offTopicCount || 0;
 

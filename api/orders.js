@@ -194,15 +194,42 @@ export default async function handler(req, res) {
         const fullConversation = await fetchMergedConversation(resolved.tenantId, ctx.sessionId, ctx.customer.id);
         const transcriptText = fullConversation.map((m) => `${m.sender.toUpperCase()}: ${m.message}`).join('\n');
 
-        const FINALIZE_SYSTEM_PROMPT = `You are finalizing a food order after a staff member helped the customer during a live handoff. Read the conversation below and call confirm_order with the FULL final item list the customer and staff agreed on. Then write a short, friendly closing message confirming the order and its total, mentioning GST. Never invent menu items — only use ones already referenced in the conversation below. If no order was actually agreed on (e.g. the customer only asked a question), don't call confirm_order — just write a short, friendly closing message instead.
+        // Give the AI the order's ACTUAL current contents as structured
+        // fact, not something to infer from conversation text. Without
+        // this, "cancel one" or "yup" to a staff question has no concrete
+        // starting point to compute a new total from.
+        let currentOrderText = 'No order exists yet for this conversation.';
+        if (ctx.orderId) {
+          const { data: existingOrder } = await supabaseAdmin.from('orders').select('order_number, items, total, status').eq('id', ctx.orderId).single();
+          if (existingOrder) {
+            const itemLines = existingOrder.items.map((i) => `- ${i.qty}x ${i.name} ($${i.price} each)`).join('\n');
+            currentOrderText = `Order #${existingOrder.order_number} (status: ${existingOrder.status}) currently contains:\n${itemLines}\nCurrent total: $${existingOrder.total}`;
+          }
+        }
+
+        const FINALIZE_SYSTEM_PROMPT = `You are finalizing a food order after a staff member helped the customer during a live handoff.
+
+Current order state (this is FACT, not something to guess from the conversation):
+${currentOrderText}
+
+Read the conversation below and figure out what the customer's order should be now. If staff and customer agreed to ADD something, use find_menu_items to resolve it to a real item and price, then call confirm_order with the current order's items PLUS the new one. If they agreed to REMOVE or REDUCE something, call confirm_order with the current order's items minus that change — compute the new full list yourself starting from the current order state above, don't just guess a final quantity.
+
+Never invent menu items or prices — always verify with find_menu_items first if an item is mentioned by name in the conversation and you don't already have its real id/price from the current order state above.
+
+After calling confirm_order (or deciding no change is actually needed), write a short, friendly closing message stating the final total and mentioning GST. If no order was agreed on at all (e.g. the customer only asked a question), don't call confirm_order — just write a short, friendly reply instead.
 
 Conversation:
 ${transcriptText}`;
 
         const claudeTools = [
           {
+            name: 'find_menu_items',
+            description: 'Search the menu by name or category keyword to resolve an item mentioned in conversation to its real id and price.',
+            input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] }
+          },
+          {
             name: 'confirm_order',
-            description: 'Finalize the order with the agreed item list.',
+            description: 'Finalize the order with the FULL current item list — not just what changed. Safe to call even if nothing actually needs to change.',
             input_schema: {
               type: 'object',
               properties: {
@@ -223,6 +250,14 @@ ${transcriptText}`;
         const openaiTools = claudeTools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
 
         async function runTool(name, input) {
+          if (name === 'find_menu_items') {
+            const safeQuery = (input.query || '').replace(/[,()]/g, '').trim();
+            let q = supabaseAdmin.from('menu_items').select('id, name, category, price').eq('tenant_id', resolved.tenantId).eq('active', true);
+            if (safeQuery) q = q.or(`name.ilike.%${safeQuery}%,category.ilike.%${safeQuery}%`);
+            const { data, error } = await q.limit(50);
+            if (error) return { error: error.message };
+            return { items: data };
+          }
           if (name === 'confirm_order') {
             return confirmOrder(input, resolved.tenantId, ctx.customer.id, true, ctx.orderId, ctx.sessionId);
           }
@@ -231,11 +266,11 @@ ${transcriptText}`;
 
         let finalReply;
         try {
-          const messages = [{ role: 'user', content: 'Please finalize this based on the conversation above.' }];
+          const messages = [{ role: 'user', content: 'Please finalize this based on the conversation and current order state above.' }];
           const result =
             provider === 'openai'
-              ? await runOpenAiLoop(messages, runTool, { model: 'gpt-4o-mini', systemPrompt: FINALIZE_SYSTEM_PROMPT, tools: openaiTools })
-              : await runClaudeLoop(messages, runTool, { model: 'claude-haiku-4-5-20251001', systemPrompt: FINALIZE_SYSTEM_PROMPT, tools: claudeTools });
+              ? await runOpenAiLoop(messages, runTool, { model: 'gpt-4o-mini', systemPrompt: FINALIZE_SYSTEM_PROMPT, tools: openaiTools, maxTokens: 2048 })
+              : await runClaudeLoop(messages, runTool, { model: 'claude-haiku-4-5-20251001', systemPrompt: FINALIZE_SYSTEM_PROMPT, tools: claudeTools, maxTokens: 2048 });
           finalReply = result.text;
         } catch (err) {
           return res.status(500).json({ error: 'AI finalize failed: ' + err.message });
