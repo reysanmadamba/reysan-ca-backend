@@ -108,12 +108,22 @@ export default async function handler(req, res) {
       return res.status(200).json({ customers: data });
     }
 
-    const { data, error } = await supabaseAdmin
+    // Optional day filter for reporting — date_from/date_to are ISO
+    // timestamps computed client-side from the staff member's own local
+    // midnight-to-midnight, so this never has to guess a timezone.
+    let ordersQuery = supabaseAdmin
       .from('orders')
       .select('*, customers(id, name, phone, area_code_flag, phone_verified, banned)')
       .eq('tenant_id', resolved.tenantId)
-      .order('created_at', { ascending: false })
-      .limit(50);
+      .order('created_at', { ascending: false });
+
+    if (req.query.date_from && req.query.date_to) {
+      ordersQuery = ordersQuery.gte('created_at', req.query.date_from).lt('created_at', req.query.date_to).limit(500);
+    } else {
+      ordersQuery = ordersQuery.limit(50);
+    }
+
+    const { data, error } = await ordersQuery;
     if (error) return res.status(500).json({ error: error.message });
 
     const { data: banned, error: bannedErr } = await supabaseAdmin

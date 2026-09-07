@@ -17,6 +17,8 @@ Always call find_menu_items first to locate what the staff member means, by name
 
 For anything involving "all", "everything", or a long list of items — e.g. "mark everything unavailable", "activate the whole menu", "make everything available except the 10pc bucket" — use bulk_set_availability instead of calling update_menu_item many times. It's one reliable operation regardless of how many items there are.
 
+To create a brand new item that doesn't exist yet, use create_menu_item — check with find_menu_items first that nothing similar already exists under a slightly different name. To edit an existing item's description, price, name, or flags, use update_menu_item, same as changing availability.
+
 IMPORTANT: always call find_menu_items again for every new question or command, even if you already looked up something similar earlier in this conversation. The menu can change between messages — staff may update items through the regular dashboard UI too, not just through you — so a result from a few messages ago may already be stale. Never answer a question about current availability, price, or status from memory of an earlier tool result; always check fresh.
 
 After making a change, confirm briefly in plain language (e.g. "Marked 10pc Chicken Bucket as unavailable."). If nothing needed changing, just say so.`;
@@ -63,6 +65,23 @@ const AI_TOOLS = [
         }
       },
       required: ['default_active']
+    }
+  },
+  {
+    name: 'create_menu_item',
+    description: 'Create a brand new menu item that doesn\'t exist yet. Use find_menu_items first to confirm it doesn\'t already exist under a similar name before creating a duplicate.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        category: { type: 'string' },
+        name: { type: 'string' },
+        description: { type: 'string' },
+        price: { type: 'number' },
+        popular: { type: 'boolean' },
+        spicy: { type: 'boolean' },
+        veg: { type: 'boolean' }
+      },
+      required: ['category', 'name', 'price']
     }
   }
 ];
@@ -150,6 +169,31 @@ export default async function handler(req, res) {
           if (exErr) return { error: exErr.message };
         }
         return { ok: true, default_active, exceptions_applied: exceptions.length };
+      }
+      if (name === 'create_menu_item') {
+        const { category, name: itemName, description, price, popular, spicy, veg } = input;
+        if (!category || !itemName || price === undefined) {
+          return { error: 'category, name, and price are required to create an item.' };
+        }
+        const { data, error } = await supabaseAdmin
+          .from('menu_items')
+          .insert({
+            tenant_id: resolved.tenantId,
+            category,
+            name: itemName,
+            description: description || null,
+            price,
+            popular: !!popular,
+            spicy: !!spicy,
+            veg: !!veg,
+            active: true,
+            allergens: [],
+            attributes: {}
+          })
+          .select()
+          .single();
+        if (error) return { error: error.message };
+        return { created: data };
       }
       return { error: 'Unknown tool' };
     }
