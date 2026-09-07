@@ -22,7 +22,7 @@ After making a change, confirm briefly in plain language (e.g. "Marked 10pc Chic
 const AI_TOOLS = [
   {
     name: 'find_menu_items',
-    description: 'Search current menu items by name or category keyword. Always returns live, current data — call this fresh every time, even if you searched something similar earlier in this conversation, since the menu can change between messages.',
+    description: 'Search current menu items by name or category keyword. Pass an empty string for query to list the entire menu — do NOT pass words like "all" or "everything" as the query itself, since those get searched for literally as text and won\'t match real item names. Always returns live, current data — call this fresh every time, even if you searched something similar earlier in this conversation, since the menu can change between messages.',
     input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] }
   },
   {
@@ -85,13 +85,17 @@ export default async function handler(req, res) {
         // this is a staff-only tool, but sanitizing cheaply avoids a
         // malformed query if a weird phrase makes it through.
         const safeQuery = (input.query || '').replace(/[,()]/g, '').trim();
-        if (!safeQuery) return { items: [] };
-        const { data, error } = await supabaseAdmin
+
+        let query = supabaseAdmin
           .from('menu_items')
           .select('id, name, category, price, active')
-          .eq('tenant_id', resolved.tenantId)
-          .or(`name.ilike.%${safeQuery}%,category.ilike.%${safeQuery}%`)
-          .limit(200);
+          .eq('tenant_id', resolved.tenantId);
+
+        // An empty/generic query means "show everything" — it should never
+        // silently return zero results and get reported as "no items exist".
+        if (safeQuery) query = query.or(`name.ilike.%${safeQuery}%,category.ilike.%${safeQuery}%`);
+
+        const { data, error } = await query.limit(200);
         if (error) return { error: error.message };
         return { items: data };
       }
