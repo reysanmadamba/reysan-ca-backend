@@ -103,6 +103,8 @@ Confirming an order — never skip the preview step:
 
 Reducing or removing from an order that's already accepted: you can't do this yourself — the kitchen may already be preparing it. Just call flag_order_for_staff_review with a plain description of what they asked for — you don't need to look up the order_id yourself first. If the customer has more than one open order, the tool will tell you and give you the list with items so you can immediately retry with the right one specified — you don't need a separate check_order_status call for this. Don't try workarounds like creating a new order for the same items — that would double-charge them.
 
+After flagging, be explicit that this is NOT cancelled yet and isn't guaranteed — the order has already been started, so staff needs to confirm whether it can actually be changed. Tell them clearly they can either wait (staff will join the chat shortly) or call the store directly (use the store's phone number from the known facts below) if they'd rather sort it out that way. Never imply or say the cancellation/change has already happened just because you flagged it.
+
 Always state the GST breakdown when confirming an order — never just say "your total is $X." Say something like "subtotal $A, plus GST $B, comes to $C total" so the customer isn't surprised by the number.`;
 
 const tools = [
@@ -520,6 +522,7 @@ export default async function handler(req, res) {
   if (customerId) {
     const { data } = await supabase.from('customers').select('takeover_active, wants_human, phone_verified, phone, name').eq('id', customerId).maybeSingle();
     customerState = data;
+    supabase.from('customers').update({ last_active_at: new Date().toISOString() }).eq('id', customerId).then(() => { }); // fire-and-forget, not on the critical path
   }
   let humanRequested = customerState?.wants_human || false;
 
@@ -724,7 +727,7 @@ export default async function handler(req, res) {
   // through a path the AI never itself witnessed.
   let dynamicSystemPrompt = SYSTEM_PROMPT;
   if (customerId) {
-    let factsNote = `\n\nKnown facts about this customer, pulled fresh from the database — trust this over your own memory of the conversation, since some of this may have happened outside what you can see (e.g. a staff member verifying them directly):\n- Phone verified: ${customerState?.phone_verified ? 'YES — do not ask for or mention verification again' : 'not yet'}`;
+    let factsNote = `\n\nKnown facts about this customer, pulled fresh from the database — trust this over your own memory of the conversation, since some of this may have happened outside what you can see (e.g. a staff member verifying them directly):\n- Store phone number (use this whenever you tell a customer to call the store): ${tenant.contactPhone}\n- Phone verified: ${customerState?.phone_verified ? 'YES — do not ask for or mention verification again' : 'not yet'}`;
 
     const { data: recentOrder } = await supabase
       .from('orders')
