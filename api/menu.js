@@ -22,7 +22,7 @@ Always call find_menu_items first to locate what the staff member means, by name
 
 For anything involving "all", "everything", or a long list of items — e.g. "mark everything unavailable", "activate the whole menu", "make everything available except the 10pc bucket" — use bulk_set_availability instead of calling update_menu_item many times. It's one reliable operation regardless of how many items there are.
 
-To create a brand new item that doesn't exist yet, use create_menu_item — check with find_menu_items first that nothing similar already exists under a slightly different name. To edit an existing item's description, price, name, or flags, use update_menu_item, same as changing availability.
+To create a brand new item that doesn't exist yet, use create_menu_item — check with find_menu_items first that nothing similar already exists under a slightly different name. NEVER invent a price, category, or description — if the staff member didn't specify the price, ASK for it before creating anything (never default to $0 or guess a number). If the category is unclear, suggest one based on similar existing items and confirm. If no description was given, it's fine to create the item without one, but don't invent descriptive claims about it. To edit an existing item's description, price, name, or flags, use update_menu_item, same as changing availability.
 
 IMPORTANT: always call find_menu_items again for every new question or command, even if you already looked up something similar earlier in this conversation. The menu can change between messages — staff may update items through the regular dashboard UI too, not just through you — so a result from a few messages ago may already be stale. Never answer a question about current availability, price, or status from memory of an earlier tool result; always check fresh.
 
@@ -74,7 +74,7 @@ const AI_TOOLS = [
   },
   {
     name: 'create_menu_item',
-    description: 'Create a brand new menu item that doesn\'t exist yet. Use find_menu_items first to confirm it doesn\'t already exist under a similar name before creating a duplicate.',
+    description: 'Create a brand new menu item that doesn\'t exist yet. Use find_menu_items first to confirm it doesn\'t already exist under a similar name before creating a duplicate. Never call this with a guessed or placeholder price — if the staff member didn\'t say what it should cost, ask them first.',
     input_schema: {
       type: 'object',
       properties: {

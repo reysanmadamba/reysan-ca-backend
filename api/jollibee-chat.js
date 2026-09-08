@@ -34,6 +34,7 @@ const ALLOWED_AREA_CODES = ['587', '780']; // Edmonton — soft flag only, never
 const MAX_PER_SESSION_PER_HOUR = 20;
 const MAX_OFF_TOPIC_WARNINGS = 3; // after this many, the conversation ends
 const MAX_OTP_REMINDERS = 2; // ask once, remind once, then end if still not provided
+const MAX_GUEST_INFO_REMINDERS = 3; // ask 3 times for real contact info before giving up and directing them to call
 const MAX_PER_IP_PER_HOUR = 40;
 const MAX_GLOBAL_PER_TENANT_PER_HOUR = 500; // fix #3 — the actual spend cap
 const FETCH_TIMEOUT_MS = 10000;
@@ -220,8 +221,25 @@ const tools = [
     input_schema: { type: 'object', properties: {} }
   },
   {
+    name: 'update_guest_info',
+    description: 'Use this to give a real name and phone number to a customer who was previously anonymous (skipped identifying themselves to reach a human) but now has an actual order placed. This does NOT trigger OTP verification — it just records real contact info for staff.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        phone: { type: 'string' }
+      },
+      required: ['name', 'phone']
+    }
+  },
+  {
     name: 'note_otp_reminder_sent',
     description: 'Call this every time you have to remind the customer they still need to provide their verification code, after already asking once. Tracks how many reminders have been sent — after the limit, the system ends the conversation automatically.',
+    input_schema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'note_guest_info_reminder_sent',
+    description: 'Call this every time you ask an anonymous guest (with an order already placed) for their real name/phone and they decline or don\'t answer. After 3 of these, the system ends the conversation automatically and directs them to call the store.',
     input_schema: { type: 'object', properties: {} }
   }
 ];
@@ -446,6 +464,29 @@ async function resetOrders(tenantId, customerId) {
   return { ok: true, cancelled, flagged_for_staff: flaggedForStaff };
 }
 
+async function updateGuestInfo({ name, phone }, tenantId, customerId) {
+  if (!customerId) return { error: 'No customer to update.' };
+  const digits = phone.replace(/\D/g, '');
+
+  // Don't silently merge into or overwrite a DIFFERENT existing customer
+  // that already owns this phone number — that's a real conflict a human
+  // should sort out, not something to resolve automatically.
+  const { data: conflict } = await supabase
+    .from('customers')
+    .select('id')
+    .eq('tenant_id', tenantId)
+    .eq('phone', digits)
+    .neq('id', customerId)
+    .maybeSingle();
+  if (conflict) {
+    return { error: 'That phone number is already associated with a different account — let the customer know staff will need to sort this out, and don\'t update it yourself.' };
+  }
+
+  const { error } = await supabase.from('customers').update({ name, phone: digits }).eq('id', customerId);
+  if (error) return { error: error.message };
+  return { ok: true };
+}
+
 export default async function handler(req, res) {
   const origin = req.headers.origin;
   // Fix #2: cosmetic only, not the actual gate
@@ -460,7 +501,7 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const clientIp = getClientIp(req);
-  const { message, history = [], token, customerId, phoneVerified, orderId, offTopicCount, otpReminderCount } = req.body;
+  const { message, history = [], token, customerId, phoneVerified, orderId, offTopicCount, otpReminderCount, guestInfoReminderCount } = req.body;
 
   // verify the Turnstile-issued session token before anything else
   const session = verifyToken(token);
@@ -477,7 +518,7 @@ export default async function handler(req, res) {
   // closed for "going off topic" while they wait — that's backwards.
   let customerState = null;
   if (customerId) {
-    const { data } = await supabase.from('customers').select('takeover_active, wants_human, phone_verified').eq('id', customerId).maybeSingle();
+    const { data } = await supabase.from('customers').select('takeover_active, wants_human, phone_verified, phone, name').eq('id', customerId).maybeSingle();
     customerState = data;
   }
   let humanRequested = customerState?.wants_human || false;
@@ -501,6 +542,17 @@ export default async function handler(req, res) {
       reply: "We weren't able to verify your number, so I have to close this chat for now — feel free to start a new one anytime and we can try again.",
       conversationEnded: true,
       otpReminderCount
+    });
+  }
+
+  // Same for an anonymous guest who keeps declining to give real contact
+  // info even after their order is placed — after enough reminders, end
+  // the chat and point them to the store's real phone number.
+  if (guestInfoReminderCount >= MAX_GUEST_INFO_REMINDERS && !humanRequested) {
+    return res.status(200).json({
+      reply: `I'm sorry, but we can't complete this order without a way to reach you — please call the store directly at ${tenant.contactPhone} if you'd like to order by phone instead.`,
+      conversationEnded: true,
+      guestInfoReminderCount
     });
   }
 
@@ -600,6 +652,7 @@ export default async function handler(req, res) {
   let currentOrderId = orderId || null;
   let currentOffTopicCount = offTopicCount || 0;
   let currentOtpReminderCount = otpReminderCount || 0;
+  let currentGuestInfoReminderCount = guestInfoReminderCount || 0;
 
   // Shared dispatcher — same tool execution regardless of which provider
   // asked for it, so behavior can't drift between the two.
@@ -619,6 +672,7 @@ export default async function handler(req, res) {
     if (name === 'check_order_status') return checkOrderStatus(input, tenantId, tenant.contactPhone);
     if (name === 'flag_order_for_staff_review') return flagOrderForReview(input, tenantId, currentCustomerId);
     if (name === 'reset_orders') return resetOrders(tenantId, currentCustomerId);
+    if (name === 'update_guest_info') return updateGuestInfo(input, tenantId, currentCustomerId);
     if (name === 'flag_off_topic') {
       currentOffTopicCount += 1;
       return { count: currentOffTopicCount, limit_reached: currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS && !humanRequested };
@@ -626,6 +680,10 @@ export default async function handler(req, res) {
     if (name === 'note_otp_reminder_sent') {
       currentOtpReminderCount += 1;
       return { count: currentOtpReminderCount, limit_reached: currentOtpReminderCount >= MAX_OTP_REMINDERS && !humanRequested };
+    }
+    if (name === 'note_guest_info_reminder_sent') {
+      currentGuestInfoReminderCount += 1;
+      return { count: currentGuestInfoReminderCount, limit_reached: currentGuestInfoReminderCount >= MAX_GUEST_INFO_REMINDERS && !humanRequested };
     }
     if (name === 'flag_wants_human') {
       let idToUse = currentCustomerId;
@@ -679,6 +737,10 @@ export default async function handler(req, res) {
     if (recentOrder) {
       const itemsSummary = recentOrder.items.map((i) => `${i.qty}x ${i.name}`).join(', ');
       factsNote += `\n- Most recent open order: #${recentOrder.order_number} (${recentOrder.status}) — ${itemsSummary}, total $${recentOrder.total}`;
+
+      if (!customerState?.phone) {
+        factsNote += `\n- This customer is ANONYMOUS (skipped giving name/phone to reach a human) but now has a real order placed. If you haven't already asked in this conversation, politely ask for their real name and phone now — explain it's so staff can contact them if there's any issue and identify them at pickup. Once they give it, call update_guest_info. If they decline or don't answer, call note_guest_info_reminder_sent — after a few of these the system will end the conversation and point them to call the store instead, so you don't need to track the count yourself.`;
+      }
     } else {
       factsNote += `\n- No open orders currently.`;
     }
@@ -714,8 +776,12 @@ export default async function handler(req, res) {
       orderId: currentOrderId,
       offTopicCount: currentOffTopicCount,
       otpReminderCount: currentOtpReminderCount,
+      guestInfoReminderCount: currentGuestInfoReminderCount,
       conversationEnded:
-        (currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS || currentOtpReminderCount >= MAX_OTP_REMINDERS) && !humanRequested
+        (currentOffTopicCount >= MAX_OFF_TOPIC_WARNINGS ||
+          currentOtpReminderCount >= MAX_OTP_REMINDERS ||
+          currentGuestInfoReminderCount >= MAX_GUEST_INFO_REMINDERS) &&
+        !humanRequested
     });
   } catch (err) {
     console.error('jollibee-chat error', err);
