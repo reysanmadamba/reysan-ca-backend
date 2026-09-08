@@ -101,7 +101,7 @@ export default async function handler(req, res) {
     if (req.query.wants_human === 'true') {
       const { data, error } = await supabaseAdmin
         .from('customers')
-        .select('id, name, phone, takeover_active')
+        .select('id, name, phone, takeover_active, last_active_at')
         .eq('tenant_id', resolved.tenantId)
         .eq('wants_human', true);
       if (error) return res.status(500).json({ error: error.message });
@@ -223,7 +223,7 @@ export default async function handler(req, res) {
     const {
       order_id, status, eta_minutes, needs_attention, attention_note, items,
       ban_customer_id, unban_customer_id, takeover_action, staff_message,
-      takeover_customer_id, tenant_id
+      takeover_customer_id, tenant_id, cancellation_reason
     } = req.body;
     const resolved = resolveTenantId(auth, tenant_id);
     if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
@@ -421,6 +421,35 @@ ${transcriptText}`;
       return res.status(200).json({ ok: true });
     }
 
+    // Manually ban a phone number directly, even if that person has never
+    // placed an order — finds their existing record if one exists, or
+    // creates a pre-banned placeholder so they're blocked the moment they
+    // ever do try to order.
+    if (req.body.manual_ban) {
+      const { name, phone } = req.body.manual_ban;
+      const digits = (phone || '').replace(/\D/g, '');
+      if (!digits) return res.status(400).json({ error: 'A phone number is required.' });
+
+      const { data: existing } = await supabaseAdmin
+        .from('customers')
+        .select('id')
+        .eq('tenant_id', resolved.tenantId)
+        .eq('phone', digits)
+        .maybeSingle();
+
+      if (existing) {
+        const { error } = await supabaseAdmin.from('customers').update({ banned: true }).eq('id', existing.id);
+        if (error) return res.status(500).json({ error: error.message });
+        return res.status(200).json({ ok: true, created: false });
+      }
+
+      const { error } = await supabaseAdmin
+        .from('customers')
+        .insert({ tenant_id: resolved.tenantId, name: name || 'Banned (manual)', phone: digits, banned: true });
+      if (error) return res.status(500).json({ error: error.message });
+      return res.status(200).json({ ok: true, created: true });
+    }
+
     if (!order_id) return res.status(400).json({ error: 'order_id is required' });
     if (status === undefined && needs_attention === undefined && items === undefined) {
       return res.status(400).json({ error: 'status, needs_attention, or items is required' });
@@ -431,6 +460,7 @@ ${transcriptText}`;
     if (eta_minutes !== undefined) update.eta_minutes = eta_minutes;
     if (needs_attention !== undefined) update.needs_attention = needs_attention;
     if (attention_note !== undefined) update.attention_note = attention_note;
+    if (cancellation_reason !== undefined) update.cancellation_reason = cancellation_reason;
     if (status === 'accepted') update.accepted_at = new Date().toISOString();
 
     // Staff editing an order's items directly (e.g. after confirming a
