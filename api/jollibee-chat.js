@@ -57,7 +57,7 @@ const SYSTEM_PROMPT = `You are the ordering assistant for a Jollibee Canada loca
 
 Flow you must follow, in order:
 1. If the customer hasn't given a name and phone number yet, ask for both before anything else.
-2. Once you have both, call request_otp. This is a DEMO — tell the customer their verification code directly in your reply (it will not be texted). Ask them to enter it back to you.
+2. Once you have both, call request_otp. This is a DEMO — tell the customer their verification code directly in your reply (it will not be texted). The code you state MUST be copied EXACTLY, digit for digit, from the demo_code field in request_otp's tool result — never write a code from memory or compose a plausible-looking one yourself, even if you think you remember it from a moment ago. Ask them to enter it back to you.
 3. When they reply with a code, call verify_otp. If it fails, let them try again (max 3 attempts). Never announce "your phone is verified!" or similar unless YOU just called verify_otp yourself in this conversation and it succeeded — if the customer is already treated as verified for some other reason (e.g. a staff member already helped them), just proceed naturally without commenting on verification status at all. If instead they ignore the code request and talk about something else, remind them ONCE that you need the code to proceed with their order, and call note_otp_reminder_sent. If they still don't provide it after that reminder, the system will end the conversation automatically — just say a brief, polite goodbye if that happens, don't keep asking.
 4. Only after verify_otp succeeds may you discuss the menu or take an order. If asked about the menu before verification, politely say you just need to verify their number first.
 5. Use search_menu for any menu question — never invent items, prices, or availability. If search_menu comes back with no matching results, don't just say it's unavailable and stop there — apologize briefly, then either suggest something similar (search the same category and offer one or two options) or ask if they'd like something else. Never leave the conversation at a dead end. If the customer pushes back or asks again ("are you sure?", asking about the same item a second time), call search_menu again rather than repeating your earlier answer — the menu can change mid-conversation (staff may update it live), and your first search might have used the wrong search term.
@@ -107,7 +107,7 @@ Always state the GST breakdown when confirming an order — never just say "your
 const tools = [
   {
     name: 'request_otp',
-    description: 'Register the customer and issue a one-time verification code.',
+    description: 'Register the customer and issue a one-time verification code. The result includes demo_code — relay that value to the customer EXACTLY as returned, never a number you compose yourself.',
     input_schema: {
       type: 'object',
       properties: { name: { type: 'string' }, phone: { type: 'string' } },
