@@ -227,7 +227,21 @@ export default async function handler(req, res) {
   const message = req.body.message || req.body;
   const callId = message.call?.id || req.body.call?.id || 'unknown-call';
 
-  const tenant = await getTenant();
+  // Any unexpected failure here (a DB hiccup, etc.) must still return a
+  // response Vapi understands — for assistant-request specifically, an
+  // uncaught crash would mean the call fails to connect at all with no
+  // message, which is worse than a graceful "call back later." Fail closed
+  // with a spoken apology rather than silently breaking the call.
+  let tenant;
+  try {
+    tenant = await getTenant();
+  } catch (err) {
+    console.error('[VAPI-VOICE-TENANT-LOOKUP-FAILED]', err.message);
+    if (message.type === 'assistant-request') {
+      return res.status(200).json({ error: "Sorry, we're having a technical issue right now. Please try calling back in a few minutes." });
+    }
+    tenant = null;
+  }
 
   // Fires before Vapi connects the call to any assistant at all — this is
   // the ONLY point where we can reject a call before it costs anything
@@ -235,24 +249,29 @@ export default async function handler(req, res) {
   // route through here instead of a fixed assistant assignment (see setup
   // notes) — VAPI_ASSISTANT_ID must be set for the "proceed normally" path.
   if (message.type === 'assistant-request') {
-    const rawNumber = message.call?.customer?.number || '';
-    const phoneDigits = rawNumber.replace(/\D/g, '');
+    try {
+      const rawNumber = message.call?.customer?.number || '';
+      const phoneDigits = rawNumber.replace(/\D/g, '');
 
-    if (!tenant || !tenant.voiceEnabled) {
-      return res.status(200).json({ error: "Sorry, we're not able to take calls right now. Please try again later or order through our website." });
-    }
-    if (!isWithinBusinessHours(tenant)) {
-      return res.status(200).json({ error: "Thanks for calling — we're currently closed. Please call back during our regular hours." });
-    }
-    if (phoneDigits) {
-      const { data: existing } = await supabase.from('customers').select('banned').eq('tenant_id', tenant.id).eq('phone', phoneDigits).maybeSingle();
-      if (existing?.banned) {
-        return res.status(200).json({ error: 'Sorry, this number is unable to place orders. Please contact the store directly.' });
+      if (!tenant || !tenant.voiceEnabled) {
+        return res.status(200).json({ error: "Sorry, we're not able to take calls right now. Please try again later or order through our website." });
       }
+      if (!isWithinBusinessHours(tenant)) {
+        return res.status(200).json({ error: "Thanks for calling — we're currently closed. Please call back during our regular hours." });
+      }
+      if (phoneDigits) {
+        const { data: existing } = await supabase.from('customers').select('banned').eq('tenant_id', tenant.id).eq('phone', phoneDigits).maybeSingle();
+        if (existing?.banned) {
+          return res.status(200).json({ error: 'Sorry, this number is unable to place orders. Please contact the store directly.' });
+        }
+      }
+      const assistantId = process.env.VAPI_ASSISTANT_ID;
+      if (!assistantId) return res.status(200).json({ error: 'Configuration error — assistant not set.' });
+      return res.status(200).json({ assistantId });
+    } catch (err) {
+      console.error('[VAPI-VOICE-ASSISTANT-REQUEST-FAILED]', err.message);
+      return res.status(200).json({ error: "Sorry, we're having a technical issue right now. Please try calling back in a few minutes." });
     }
-    const assistantId = process.env.VAPI_ASSISTANT_ID;
-    if (!assistantId) return res.status(200).json({ error: 'Configuration error — assistant not set.' });
-    return res.status(200).json({ assistantId });
   }
 
   // A call just ended — record its actual minutes. This is the only place
