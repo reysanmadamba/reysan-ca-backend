@@ -18,8 +18,25 @@ const TENANT_SLUG = 'timhortons';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
 async function getTenant() {
-  const { data } = await supabase.from('tenants').select('id, contact_phone').eq('slug', TENANT_SLUG).single();
-  return data ? { id: data.id, contactPhone: data.contact_phone || 'the store' } : null;
+  const { data } = await supabase.from('tenants').select('id, contact_phone, voice_minutes_cap').eq('slug', TENANT_SLUG).single();
+  return data ? { id: data.id, contactPhone: data.contact_phone || 'the store', voiceMinutesCap: data.voice_minutes_cap ?? 300 } : null;
+}
+
+// Combined AI + human minutes, this calendar month, against the tenant's
+// cap — checked before every tool call so a call already past the cap can't
+// keep placing orders, searching the menu, etc. (Doesn't hang up an
+// in-progress call by itself — see the note where this is used.)
+async function isOverMinutesCap(tenantId, capMinutes) {
+  const monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const { data } = await supabase
+    .from('voice_calls')
+    .select('duration_seconds')
+    .eq('tenant_id', tenantId)
+    .gte('created_at', monthStart.toISOString());
+  const usedSeconds = (data || []).reduce((sum, r) => sum + Number(r.duration_seconds || 0), 0);
+  return usedSeconds >= capMinutes * 60;
 }
 
 // Every tool call needs the caller's own customer row. Created once per
@@ -176,13 +193,52 @@ export default async function handler(req, res) {
   console.log('[VAPI-VOICE-HIT]', JSON.stringify(req.body).slice(0, 2000));
 
   const message = req.body.message || req.body;
-  const toolCalls = message.toolCallList || message.toolCalls || [];
-  const rawNumber = message.call?.customer?.number || req.body.call?.customer?.number || '';
-  const phoneDigits = rawNumber.replace(/\D/g, '');
   const callId = message.call?.id || req.body.call?.id || 'unknown-call';
 
   const tenant = await getTenant();
+
+  // A call just ended — record its actual minutes. This is the only place
+  // we learn real duration, since tool-call requests happen mid-call with
+  // no final length yet.
+  if (message.type === 'end-of-call-report') {
+    if (tenant) {
+      const rawNumber = message.call?.customer?.number || '';
+      await supabase.from('voice_calls').upsert(
+        {
+          tenant_id: tenant.id,
+          call_id: callId,
+          phone: rawNumber.replace(/\D/g, ''),
+          duration_seconds: message.durationSeconds || 0,
+          cost_usd: message.cost || 0,
+          ended_reason: message.endedReason || null,
+          recording_url: message.artifact?.recordingUrl || null,
+          transcript: message.artifact?.transcript || null
+        },
+        { onConflict: 'call_id' }
+      );
+    }
+    return res.status(200).json({ ok: true });
+  }
+
+  const toolCalls = message.toolCallList || message.toolCalls || [];
+  const rawNumber = message.call?.customer?.number || req.body.call?.customer?.number || '';
+  const phoneDigits = rawNumber.replace(/\D/g, '');
+
   if (!tenant) return res.status(500).json({ results: toolCalls.map((tc) => ({ toolCallId: tc.id, result: 'Configuration error.' })) });
+
+  // Combined AI + human minutes cap, hard lock — a call already in progress
+  // when the cap is hit just can't DO anything (order, search, etc.) for
+  // the rest of the month; it doesn't hang up on its own mid-call, but
+  // every tool call from here on tells the AI to wrap up and redirect the
+  // caller, and the assistant's own prompt/Hang Up tool takes it from there.
+  if (await isOverMinutesCap(tenant.id, tenant.voiceMinutesCap)) {
+    return res.status(200).json({
+      results: toolCalls.map((tc) => ({
+        toolCallId: tc.id,
+        result: `We've reached our call capacity for this month. Politely apologize, tell the caller to try our website chat or call ${tenant.contactPhone} directly, and end the call.`
+      }))
+    });
+  }
 
   let customerId = null;
   if (phoneDigits) {
