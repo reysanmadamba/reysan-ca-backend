@@ -201,8 +201,20 @@ export default async function handler(req, res) {
 
   const results = [];
   for (const tc of toolCalls) {
-    const name = tc.name;
-    const input = tc.arguments || tc.parameters || {};
+    // Vapi passes through OpenAI's native tool-call shape, which nests the
+    // name and arguments under a `function` object — not flat on the call
+    // itself. `arguments` there is also a JSON *string*, not an object.
+    // Handle both shapes defensively since Vapi's own docs were inconsistent
+    // about this across two different pages.
+    const name = tc.name || tc.function?.name;
+    let input = tc.arguments ?? tc.parameters ?? tc.function?.arguments ?? {};
+    if (typeof input === 'string') {
+      try {
+        input = JSON.parse(input);
+      } catch {
+        input = {};
+      }
+    }
     let result;
     try {
       if (!customerId) {
