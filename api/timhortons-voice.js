@@ -18,8 +18,29 @@ const TENANT_SLUG = 'timhortons';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
 async function getTenant() {
-  const { data } = await supabase.from('tenants').select('id, contact_phone, voice_minutes_cap').eq('slug', TENANT_SLUG).single();
-  return data ? { id: data.id, contactPhone: data.contact_phone || 'the store', voiceMinutesCap: data.voice_minutes_cap ?? 300 } : null;
+  const { data } = await supabase
+    .from('tenants')
+    .select('id, contact_phone, voice_minutes_cap, voice_enabled, voice_open_hour, voice_close_hour, voice_timezone')
+    .eq('slug', TENANT_SLUG)
+    .single();
+  return data
+    ? {
+        id: data.id,
+        contactPhone: data.contact_phone || 'the store',
+        voiceMinutesCap: data.voice_minutes_cap ?? 300,
+        voiceEnabled: data.voice_enabled ?? true,
+        openHour: data.voice_open_hour ?? 0,
+        closeHour: data.voice_close_hour ?? 24,
+        timezone: data.voice_timezone || 'America/Edmonton'
+      }
+    : null;
+}
+
+function isWithinBusinessHours(tenant) {
+  if (tenant.closeHour >= 24 && tenant.openHour <= 0) return true; // open all day
+  const hourStr = new Intl.DateTimeFormat('en-US', { timeZone: tenant.timezone, hour: 'numeric', hour12: false }).format(new Date());
+  const hour = parseInt(hourStr, 10) % 24;
+  return hour >= tenant.openHour && hour < tenant.closeHour;
 }
 
 // Combined AI + human minutes, this calendar month, against the tenant's
@@ -55,7 +76,7 @@ async function getOrCreateCustomer(phoneDigits, tenantId, callId) {
   if (!customer) {
     const { data: newCustomer, error } = await supabase
       .from('customers')
-      .insert({ tenant_id: tenantId, name: 'Voice caller', phone: phoneDigits, phone_verified: true, last_session_id: callId })
+      .insert({ tenant_id: tenantId, name: 'Voice caller', phone: phoneDigits, phone_verified: true, last_session_id: callId, source: 'voice' })
       .select()
       .single();
     if (error) throw new Error(error.message);
@@ -66,6 +87,17 @@ async function getOrCreateCustomer(phoneDigits, tenantId, callId) {
   }
 
   return { customer };
+}
+
+// New customer rows are created with a "Voice caller" placeholder name since
+// the caller ID only gives a phone number, not a name — this is how the AI
+// saves the real name once it asks for it, per the prompt's "just ask for
+// their first name early on" instruction.
+async function saveCallerName(name, tenantId, customerId) {
+  if (!name) return { error: 'A name is required.' };
+  const { error } = await supabase.from('customers').update({ name }).eq('id', customerId).eq('tenant_id', tenantId);
+  if (error) return { error: error.message };
+  return { ok: true };
 }
 
 async function searchMenu({ category, keyword, veg_only, max_price }, tenantId) {
@@ -197,6 +229,32 @@ export default async function handler(req, res) {
 
   const tenant = await getTenant();
 
+  // Fires before Vapi connects the call to any assistant at all — this is
+  // the ONLY point where we can reject a call before it costs anything
+  // beyond the bare inbound leg. Requires the phone number's own config to
+  // route through here instead of a fixed assistant assignment (see setup
+  // notes) — VAPI_ASSISTANT_ID must be set for the "proceed normally" path.
+  if (message.type === 'assistant-request') {
+    const rawNumber = message.call?.customer?.number || '';
+    const phoneDigits = rawNumber.replace(/\D/g, '');
+
+    if (!tenant || !tenant.voiceEnabled) {
+      return res.status(200).json({ error: "Sorry, we're not able to take calls right now. Please try again later or order through our website." });
+    }
+    if (!isWithinBusinessHours(tenant)) {
+      return res.status(200).json({ error: "Thanks for calling — we're currently closed. Please call back during our regular hours." });
+    }
+    if (phoneDigits) {
+      const { data: existing } = await supabase.from('customers').select('banned').eq('tenant_id', tenant.id).eq('phone', phoneDigits).maybeSingle();
+      if (existing?.banned) {
+        return res.status(200).json({ error: 'Sorry, this number is unable to place orders. Please contact the store directly.' });
+      }
+    }
+    const assistantId = process.env.VAPI_ASSISTANT_ID;
+    if (!assistantId) return res.status(200).json({ error: 'Configuration error — assistant not set.' });
+    return res.status(200).json({ assistantId });
+  }
+
   // A call just ended — record its actual minutes. This is the only place
   // we learn real duration, since tool-call requests happen mid-call with
   // no final length yet.
@@ -275,6 +333,8 @@ export default async function handler(req, res) {
     try {
       if (!customerId) {
         result = { error: 'Could not identify caller phone number.' };
+      } else if (name === 'save_caller_name') {
+        result = await saveCallerName(input.name, tenant.id, customerId);
       } else if (name === 'search_menu') {
         result = await searchMenu(input, tenant.id);
       } else if (name === 'check_order_status') {
