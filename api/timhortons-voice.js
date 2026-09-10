@@ -173,7 +173,7 @@ export default async function handler(req, res) {
   // Log the raw shape once while we're still verifying Vapi's exact field
   // names against the docs — safe to remove once confirmed against a real
   // test call.
-  console.log('vapi webhook body', JSON.stringify(req.body).slice(0, 2000));
+  console.log('[VAPI-VOICE-HIT]', JSON.stringify(req.body).slice(0, 2000));
 
   const message = req.body.message || req.body;
   const toolCalls = message.toolCallList || message.toolCalls || [];
