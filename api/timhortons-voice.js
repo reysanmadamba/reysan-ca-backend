@@ -17,13 +17,13 @@ import { confirmOrder, computeRemainingMinutes } from '../lib/ordering.js';
 const TENANT_SLUG = 'timhortons';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
+const DEFAULT_HOURS = { open: 0, close: 24 }; // open all day, used if a day is missing from the JSON
+const DAY_KEYS = { Mon: 'mon', Tue: 'tue', Wed: 'wed', Thu: 'thu', Fri: 'fri', Sat: 'sat', Sun: 'sun' };
+
 async function getTenant() {
   const { data } = await supabase
     .from('tenants')
-    .select(
-      'id, contact_phone, voice_minutes_cap, voice_enabled, voice_timezone, ' +
-        'voice_weekday_open_hour, voice_weekday_close_hour, voice_weekend_open_hour, voice_weekend_close_hour'
-    )
+    .select('id, contact_phone, voice_minutes_cap, voice_enabled, voice_timezone, voice_hours')
     .eq('slug', TENANT_SLUG)
     .single();
   return data
@@ -33,26 +33,24 @@ async function getTenant() {
         voiceMinutesCap: data.voice_minutes_cap ?? 300,
         voiceEnabled: data.voice_enabled ?? true,
         timezone: data.voice_timezone || 'America/Edmonton',
-        weekdayOpenHour: data.voice_weekday_open_hour ?? 0,
-        weekdayCloseHour: data.voice_weekday_close_hour ?? 24,
-        weekendOpenHour: data.voice_weekend_open_hour ?? 0,
-        weekendCloseHour: data.voice_weekend_close_hour ?? 24
+        hours: data.voice_hours || {}
       }
     : null;
 }
 
 function isWithinBusinessHours(tenant) {
-  // Weekday vs weekend is determined in the tenant's own timezone, not the
+  // Which day it is has to be checked in the tenant's own timezone, not the
   // server's — a call at 11pm Pacific on a Friday could already be
-  // Saturday morning UTC, so this has to check the local day, not just the
-  // local hour.
+  // Saturday morning UTC, so this has to use the local day, not the
+  // server's day.
   const parts = new Intl.DateTimeFormat('en-US', { timeZone: tenant.timezone, hour: 'numeric', hour12: false, weekday: 'short' }).formatToParts(new Date());
   const hour = parseInt(parts.find((p) => p.type === 'hour').value, 10) % 24;
-  const weekday = parts.find((p) => p.type === 'weekday').value; // "Sat", "Sun", etc.
-  const isWeekend = weekday === 'Sat' || weekday === 'Sun';
+  const weekdayShort = parts.find((p) => p.type === 'weekday').value; // "Mon", "Tue", etc.
+  const dayKey = DAY_KEYS[weekdayShort];
 
-  const openHour = isWeekend ? tenant.weekendOpenHour : tenant.weekdayOpenHour;
-  const closeHour = isWeekend ? tenant.weekendCloseHour : tenant.weekdayCloseHour;
+  const todayHours = (dayKey && tenant.hours[dayKey]) || DEFAULT_HOURS;
+  const { open: openHour, close: closeHour } = todayHours;
+  if (openHour === closeHour) return false; // closed all day
   if (closeHour >= 24 && openHour <= 0) return true; // open all day
   return hour >= openHour && hour < closeHour;
 }
