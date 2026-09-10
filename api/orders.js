@@ -309,12 +309,40 @@ export default async function handler(req, res) {
             .join('\n\n');
         }
 
+        // A resume can be triggered purely to close out a chat, with no
+        // intent to touch the order at all — and by then the real order may
+        // already be completed, so it won't show up in "open orders" above.
+        // Without this, the model can see zero open orders and mistake
+        // leftover conversation content (a declined upsell, an earlier
+        // mention) for a brand-new request, creating a duplicate that has
+        // nothing to do with the order that was already finished.
+        const { data: recentFinishedOrders } = await supabaseAdmin
+          .from('orders')
+          .select('id, order_number, items, total, status')
+          .eq('customer_id', ctx.customer.id)
+          .in('status', ['completed', 'cancelled'])
+          .order('created_at', { ascending: false })
+          .limit(5);
+
+        let finishedOrderText = '';
+        if (recentFinishedOrders && recentFinishedOrders.length > 0) {
+          finishedOrderText = '\n\nThis customer also has these already-FINISHED orders (for context only — they are done, do not touch or recreate them):\n' +
+            recentFinishedOrders
+              .map((o) => {
+                const itemLines = o.items.map((i) => `  - ${i.qty}x ${i.name}`).join('\n');
+                return `Order #${o.order_number} (${o.status}):\n${itemLines}\n  Total: $${o.total}`;
+              })
+              .join('\n\n');
+        }
+
         const FINALIZE_SYSTEM_PROMPT = `You are finalizing a food order after a staff member helped the customer during a live handoff.
 
 Current order state (this is FACT, not something to guess from the conversation):
-${currentOrderText}
+${currentOrderText}${finishedOrderText}
 
 Read the conversation below and figure out what the customer's order should be now.
+
+CRITICAL — a resume like this is very often triggered by staff JUST to close out and end the chat, with no order change intended at all — for example, after an order was already completed and staff is only wrapping up. Do NOT treat "zero open orders" as license to create a fresh order out of whatever the conversation happens to mention — check the FINISHED orders list above first. If what's in the conversation is already covered by a finished order (including a declined or never-confirmed upsell suggestion like an offered Timbits that the customer didn't clearly accept), there is nothing to do — write a short, friendly closing message and do NOT call confirm_order. Creating an unwanted duplicate order is a real, visible mistake that shows up on the restaurant's dashboard as a phantom order someone then has to notice and cancel — it is far worse than doing nothing. When you are not highly confident that a genuinely new, explicit, distinct request was made, don't call confirm_order — silence is the safe default here, not action.
 
 CRITICAL — trust the current order state above over the conversation's wording: the conversation may show the customer using casual phrasing for an item ("black coffee," "a bag") that an earlier step already resolved to its real menu name and price — that resolution already happened and is reflected in the current order state above. Do NOT re-derive or re-verify the order from the conversation's literal wording, and do NOT tell the customer an item "doesn't match the menu" or "isn't found" just because the word they used isn't a literal item name — if it's already sitting in the current order state above, it's real, correctly priced, and settled. Never cast doubt on, or ask the customer to reconfirm, an order that the current order state already shows as placed/accepted — that only confuses someone whose order was already fine.
 
