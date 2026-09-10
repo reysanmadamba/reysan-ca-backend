@@ -11,10 +11,10 @@
 
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
-import { verifyToken } from './jollibee-captcha.js';
+import { verifyToken } from './timhortons-captcha.js';
 import { confirmOrder, computeRemainingMinutes } from '../lib/ordering.js';
 
-const TENANT_SLUG = 'jollibee'; // default demo tenant this chat serves
+const TENANT_SLUG = 'timhortons'; // default demo tenant this chat serves
 
 // Toggle which LLM provider handles the conversation — same pattern as
 // your other demos, single constant, no other code changes needed.
@@ -70,7 +70,7 @@ function getClientIp(req) {
 const CUSTOMER_AUTH_MAX_AGE_MS = 3 * 60 * 60 * 1000; // covers ordering + pickup wait
 
 function signCustomerToken(customerId, tenantId) {
-  const payload = { type: 'jollibee_customer', customerId, tenantId, issuedAt: Date.now() };
+  const payload = { type: 'timhortons_customer', customerId, tenantId, issuedAt: Date.now() };
   const b64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const hmac = crypto.createHmac('sha256', process.env.SESSION_HMAC_SECRET).update(b64).digest('base64url');
   return `${b64}.${hmac}`;
@@ -86,7 +86,7 @@ function verifyCustomerToken(token, expectedCustomerId, tenantId) {
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
 
     const payload = JSON.parse(Buffer.from(b64, 'base64url').toString());
-    if (payload.type !== 'jollibee_customer') return false;
+    if (payload.type !== 'timhortons_customer') return false;
     if (Date.now() - payload.issuedAt > CUSTOMER_AUTH_MAX_AGE_MS) return false;
     return payload.customerId === expectedCustomerId && payload.tenantId === tenantId;
   } catch {
@@ -94,7 +94,7 @@ function verifyCustomerToken(token, expectedCustomerId, tenantId) {
   }
 }
 
-const SYSTEM_PROMPT = `You are the ordering assistant for a Jollibee Canada location, part of a demo ordering system.
+const SYSTEM_PROMPT = `You are the ordering assistant for a Tim Hortons Canada location, part of a demo ordering system.
 
 Flow you must follow, in order:
 1. If the customer hasn't given a name and phone number yet, ask for both before anything else.
@@ -111,14 +111,14 @@ Flow you must follow, in order:
 
 Be a good cashier, not a search box. Real cashiers make conversation and suggest things:
 - If the customer seems unsure what to get, ask a light question first — "feeling like chicken today, or something else?" — instead of just listing the whole menu.
-- Mention what's popular naturally when it fits, e.g. "the Chickenjoy's our best seller if you want something classic."
-- When they've picked mains, suggest a natural add-on once — a side, a drink, or dessert — the way a cashier would ask "you want fries with that?" Don't push if they decline once.
-- Occasionally reference a specific item conversationally — "have you tried the Halo-Halo? it's a customer favorite" — instead of always waiting to be asked.
+- Mention what's popular naturally when it fits, e.g. "the Double Double's our best seller if you want something classic."
+- When they've picked mains, suggest a natural add-on once — a donut, a Timbits box, or a hash brown — the way a cashier would ask "anything else with that?" Don't push if they decline once.
+- Occasionally reference a specific item conversationally — "have you tried the Maple Dip? it's a customer favorite" — instead of always waiting to be asked.
 - Keep all of this to short, casual asides. One suggestion at a time, never a list of five things back to back. If the customer just wants to order fast and says so, drop the suggestions and take the order.
 
 Handling vague or casual quantity language:
-- Customers won't always name the exact menu item. "1 bucket of chicken" means they want one of whatever bucket-sized item exists — use search_menu with category "Buckets" and match it up, don't reject the phrase just because "bucket" isn't a literal item name.
-- If more than one bucket size matches (e.g. 6pc vs 10pc vs the Family Meal), ask which one instead of guessing or telling them their request "doesn't exist." The customer describing what they want loosely is normal — your job is to map it to the real menu, not correct their phrasing.
+- Customers won't always name the exact menu item. "a box of Timbits" means they want one of whatever box-sized item exists — use search_menu with category "Timbits" and match it up, don't reject the phrase just because "box" isn't a literal item name.
+- If more than one box size matches (e.g. 10pc vs 20pc vs the 50pc box), ask which one instead of guessing or telling them their request "doesn't exist." The customer describing what they want loosely is normal — your job is to map it to the real menu, not correct their phrasing.
 - Same logic applies to any category name used casually ("a couple of drinks", "some rice") — search and clarify, never tell them something "isn't a thing" when a reasonable match exists.
 
 If you're genuinely unsure about something (a menu detail search_menu doesn't resolve, a policy question, anything outside what you can look up) — say so plainly and suggest they call the store directly, rather than guessing.
@@ -139,7 +139,7 @@ Confirming an order — never skip the preview step:
 1. Before calling confirm_order, always say back the FULL list you're about to submit and its total, then ask something like "should I go ahead with that?" — in plain text, no tool call.
 2. Only call confirm_order after the customer's NEXT message is a clear yes to that exact preview. A bare "yes" that's just acknowledging information (not answering a "should I proceed?" question) is not a confirmation — if you're unsure what they meant, ask again rather than guessing.
 3. Send the FULL order every time you call confirm_order — everything the customer wants in total, not just what's new. This is safe to repeat; calling it twice with the same list does not double anything.
-4. If the customer wants to remove or reduce something: restate the updated full list first ("so that'd bring it down to just one Halo-Halo, total $X — want me to go ahead?") and wait for their yes, exactly like adding something. Never remove or change anything silently.
+4. If the customer wants to remove or reduce something: restate the updated full list first ("so that'd bring it down to just one box of Timbits, total $X — want me to go ahead?") and wait for their yes, exactly like adding something. Never remove or change anything silently.
 5. If confirm_order comes back with new_separate_order: true, the original was already accepted and being prepared — only the genuinely new items became a second order. Tell the customer this as one running tab using the combined_total from the result, and don't do that addition yourself.
 
 Reducing or removing from an order that's already accepted: you can't do this yourself — the kitchen may already be preparing it. Just call flag_order_for_staff_review with a plain description of what they asked for — you don't need to look up the order_id yourself first. If the customer has more than one open order, the tool will tell you and give you the list with items so you can immediately retry with the right one specified — you don't need a separate check_order_status call for this. Don't try workarounds like creating a new order for the same items — that would double-charge them.
@@ -169,7 +169,7 @@ const tools = [
   },
   {
     name: 'search_menu',
-    description: 'Search the menu by category, keyword, or dietary filter. When the customer names a specific item (e.g. "Halo-Halo"), search by keyword — don\'t guess a category name, since category matching needs to be reasonably close to the real category and a wrong guess returns nothing even if the item exists. Always returns live, current data — call this fresh every time, even for an item you already searched earlier in this conversation, rather than repeating an earlier answer from memory.',
+    description: 'Search the menu by category, keyword, or dietary filter. When the customer names a specific item (e.g. "Double Double"), search by keyword — don\'t guess a category name, since category matching needs to be reasonably close to the real category and a wrong guess returns nothing even if the item exists. Always returns live, current data — call this fresh every time, even for an item you already searched earlier in this conversation, rather than repeating an earlier answer from memory.',
     input_schema: {
       type: 'object',
       properties: {
@@ -856,7 +856,7 @@ export default async function handler(req, res) {
         !humanRequested
     });
   } catch (err) {
-    console.error('jollibee-chat error', err);
+    console.error('timhortons-chat error', err);
     return res.status(500).json({ error: 'Something went wrong, please try again.' });
   }
 }

@@ -1,4 +1,4 @@
-// api/jollibee-captcha.js
+// api/timhortons-captcha.js
 //
 // Verifies a Cloudflare Turnstile token, then issues a signed session
 // token the chat endpoint will require on every message. Fixes applied
@@ -14,7 +14,7 @@
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 
-const TENANT = 'jollibee';
+const TENANT = 'timhortons';
 const SESSION_SECRET = process.env.SESSION_HMAC_SECRET;
 const TURNSTILE_SECRET = process.env.TURNSTILE_SECRET_KEY;
 const ALLOWED_ORIGINS = ['https://reysan.ca'];
@@ -42,7 +42,7 @@ function signToken(payload) {
   return `${b64}.${hmac}`;
 }
 
-// Exported so jollibee-chat.js can verify tokens issued here with the
+// Exported so timhortons-chat.js can verify tokens issued here with the
 // same constant-time comparison (fix #10 — no string !== comparison on
 // secret-derived values, which leaks timing information).
 export function verifyToken(token) {
@@ -123,7 +123,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ sessionId, token });
   } catch (err) {
-    console.error('jollibee-captcha error', err);
+    console.error('timhortons-captcha error', err);
     return res.status(500).json({ error: 'Something went wrong, please try again.' });
   }
 }
