@@ -98,6 +98,28 @@ async function getTenantDetail(tenantId, dateFrom, dateTo) {
     }
   });
 
+  // Voice call minutes — month-to-date against the tenant's cap (same
+  // calendar-month window the webhook's own cap check uses, so the number
+  // shown here always matches what's actually being enforced).
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const { data: voiceRows } = await supabaseAdmin
+    .from('voice_calls')
+    .select('id, phone, duration_seconds, cost_usd, ended_reason, recording_url, created_at')
+    .eq('tenant_id', tenantId)
+    .gte('created_at', monthStart.toISOString())
+    .order('created_at', { ascending: false });
+
+  const calls = voiceRows || [];
+  const usedMinutes = calls.reduce((sum, c) => sum + Number(c.duration_seconds || 0), 0) / 60;
+
+  // Calls store only the phone number (caller ID), not a name — look up
+  // current names in one batched query rather than one per call.
+  const uniquePhones = [...new Set(calls.map((c) => c.phone).filter(Boolean))];
+  const { data: callCustomers } = uniquePhones.length
+    ? await supabaseAdmin.from('customers').select('phone, name').eq('tenant_id', tenantId).in('phone', uniquePhones)
+    : { data: [] };
+  const nameByPhone = new Map((callCustomers || []).map((c) => [c.phone, c.name]));
+
   return {
     tenant,
     admins,
@@ -110,6 +132,20 @@ async function getTenantDetail(tenantId, dateFrom, dateTo) {
       total_cost_usd: totalCost,
       total_messages: totalMessages,
       daily: Array.from(dailyMap.values())
+    },
+    voice: {
+      minutes_used: Math.round(usedMinutes * 10) / 10,
+      minutes_cap: tenant.voice_minutes_cap ?? 300,
+      calls: calls.map((c) => ({
+        id: c.id,
+        caller_name: nameByPhone.get(c.phone) || 'Unknown',
+        phone: c.phone,
+        duration_seconds: c.duration_seconds,
+        cost_usd: c.cost_usd,
+        ended_reason: c.ended_reason,
+        recording_url: c.recording_url,
+        created_at: c.created_at
+      }))
     }
   };
 }
