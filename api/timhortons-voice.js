@@ -20,7 +20,10 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 async function getTenant() {
   const { data } = await supabase
     .from('tenants')
-    .select('id, contact_phone, voice_minutes_cap, voice_enabled, voice_open_hour, voice_close_hour, voice_timezone')
+    .select(
+      'id, contact_phone, voice_minutes_cap, voice_enabled, voice_timezone, ' +
+        'voice_weekday_open_hour, voice_weekday_close_hour, voice_weekend_open_hour, voice_weekend_close_hour'
+    )
     .eq('slug', TENANT_SLUG)
     .single();
   return data
@@ -29,18 +32,29 @@ async function getTenant() {
         contactPhone: data.contact_phone || 'the store',
         voiceMinutesCap: data.voice_minutes_cap ?? 300,
         voiceEnabled: data.voice_enabled ?? true,
-        openHour: data.voice_open_hour ?? 0,
-        closeHour: data.voice_close_hour ?? 24,
-        timezone: data.voice_timezone || 'America/Edmonton'
+        timezone: data.voice_timezone || 'America/Edmonton',
+        weekdayOpenHour: data.voice_weekday_open_hour ?? 0,
+        weekdayCloseHour: data.voice_weekday_close_hour ?? 24,
+        weekendOpenHour: data.voice_weekend_open_hour ?? 0,
+        weekendCloseHour: data.voice_weekend_close_hour ?? 24
       }
     : null;
 }
 
 function isWithinBusinessHours(tenant) {
-  if (tenant.closeHour >= 24 && tenant.openHour <= 0) return true; // open all day
-  const hourStr = new Intl.DateTimeFormat('en-US', { timeZone: tenant.timezone, hour: 'numeric', hour12: false }).format(new Date());
-  const hour = parseInt(hourStr, 10) % 24;
-  return hour >= tenant.openHour && hour < tenant.closeHour;
+  // Weekday vs weekend is determined in the tenant's own timezone, not the
+  // server's — a call at 11pm Pacific on a Friday could already be
+  // Saturday morning UTC, so this has to check the local day, not just the
+  // local hour.
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: tenant.timezone, hour: 'numeric', hour12: false, weekday: 'short' }).formatToParts(new Date());
+  const hour = parseInt(parts.find((p) => p.type === 'hour').value, 10) % 24;
+  const weekday = parts.find((p) => p.type === 'weekday').value; // "Sat", "Sun", etc.
+  const isWeekend = weekday === 'Sat' || weekday === 'Sun';
+
+  const openHour = isWeekend ? tenant.weekendOpenHour : tenant.weekdayOpenHour;
+  const closeHour = isWeekend ? tenant.weekendCloseHour : tenant.weekdayCloseHour;
+  if (closeHour >= 24 && openHour <= 0) return true; // open all day
+  return hour >= openHour && hour < closeHour;
 }
 
 // Combined AI + human minutes, this calendar month, against the tenant's
