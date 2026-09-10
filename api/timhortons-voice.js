@@ -13,17 +13,15 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { confirmOrder, computeRemainingMinutes } from '../lib/ordering.js';
+import { isWithinStoreHours } from '../lib/store-hours.js';
 
 const TENANT_SLUG = 'timhortons';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
-const DEFAULT_HOURS = { open: 0, close: 24 }; // open all day, used if a day is missing from the JSON
-const DAY_KEYS = { Mon: 'mon', Tue: 'tue', Wed: 'wed', Thu: 'thu', Fri: 'fri', Sat: 'sat', Sun: 'sun' };
-
 async function getTenant() {
   const { data } = await supabase
     .from('tenants')
-    .select('id, contact_phone, voice_minutes_cap, voice_enabled, voice_timezone, voice_hours')
+    .select('id, contact_phone, voice_minutes_cap, voice_enabled, store_timezone, store_hours')
     .eq('slug', TENANT_SLUG)
     .single();
   return data
@@ -32,27 +30,10 @@ async function getTenant() {
         contactPhone: data.contact_phone || 'the store',
         voiceMinutesCap: data.voice_minutes_cap ?? 300,
         voiceEnabled: data.voice_enabled ?? true,
-        timezone: data.voice_timezone || 'America/Edmonton',
-        hours: data.voice_hours || {}
+        timezone: data.store_timezone || 'America/Edmonton',
+        hours: data.store_hours || {}
       }
     : null;
-}
-
-function isWithinBusinessHours(tenant) {
-  // Which day it is has to be checked in the tenant's own timezone, not the
-  // server's — a call at 11pm Pacific on a Friday could already be
-  // Saturday morning UTC, so this has to use the local day, not the
-  // server's day.
-  const parts = new Intl.DateTimeFormat('en-US', { timeZone: tenant.timezone, hour: 'numeric', hour12: false, weekday: 'short' }).formatToParts(new Date());
-  const hour = parseInt(parts.find((p) => p.type === 'hour').value, 10) % 24;
-  const weekdayShort = parts.find((p) => p.type === 'weekday').value; // "Mon", "Tue", etc.
-  const dayKey = DAY_KEYS[weekdayShort];
-
-  const todayHours = (dayKey && tenant.hours[dayKey]) || DEFAULT_HOURS;
-  const { open: openHour, close: closeHour } = todayHours;
-  if (openHour === closeHour) return false; // closed all day
-  if (closeHour >= 24 && openHour <= 0) return true; // open all day
-  return hour >= openHour && hour < closeHour;
 }
 
 // Combined AI + human minutes, this calendar month, against the tenant's
@@ -268,7 +249,7 @@ export default async function handler(req, res) {
       if (!tenant || !tenant.voiceEnabled) {
         return res.status(200).json({ error: "Sorry, we're not able to take calls right now. Please try again later or order through our website." });
       }
-      if (!isWithinBusinessHours(tenant)) {
+      if (!isWithinStoreHours(tenant)) {
         return res.status(200).json({ error: "Thanks for calling — we're currently closed. Please call back during our regular hours." });
       }
       if (phoneDigits) {

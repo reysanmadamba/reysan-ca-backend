@@ -13,6 +13,7 @@ import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { verifyToken } from './timhortons-captcha.js';
 import { confirmOrder, computeRemainingMinutes } from '../lib/ordering.js';
+import { isWithinStoreHours } from '../lib/store-hours.js';
 
 const TENANT_SLUG = 'timhortons'; // default demo tenant this chat serves
 
@@ -296,8 +297,16 @@ const openaiTools = tools.map((t) => ({
 }));
 
 async function getTenant() {
-  const { data } = await supabase.from('tenants').select('id, ai_provider, contact_phone').eq('slug', TENANT_SLUG).single();
-  return data ? { id: data.id, aiProvider: data.ai_provider || 'claude', contactPhone: data.contact_phone || 'the store' } : null;
+  const { data } = await supabase.from('tenants').select('id, ai_provider, contact_phone, store_timezone, store_hours').eq('slug', TENANT_SLUG).single();
+  return data
+    ? {
+        id: data.id,
+        aiProvider: data.ai_provider || 'claude',
+        contactPhone: data.contact_phone || 'the store',
+        timezone: data.store_timezone || 'America/Edmonton',
+        hours: data.store_hours || {}
+      }
+    : null;
 }
 
 async function requestOtp({ name, phone }, tenantId, sessionId) {
@@ -698,6 +707,17 @@ export default async function handler(req, res) {
       customerAuth: customerId ? signCustomerToken(customerId, tenantId) : null,
       phoneVerified: customerState?.phone_verified || false,
       orderId,
+      offTopicCount
+    });
+  }
+
+  // Store is closed — don't spend a token running the AI loop toward an
+  // order it can't fulfill. Checked after the takeover branch above so a
+  // customer already talking to staff isn't cut off mid-conversation.
+  if (!isWithinStoreHours(tenant)) {
+    return res.status(200).json({
+      reply: `We're closed right now, so I'm not able to take new orders — please try again during our store hours, or call us at ${tenant.contactPhone}.`,
+      conversationEnded: false,
       offTopicCount
     });
   }

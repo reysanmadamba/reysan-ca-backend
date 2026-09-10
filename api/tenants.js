@@ -177,6 +177,24 @@ export default async function handler(req, res) {
     }
   }
 
+  // Same carve-out for saving store hours: every tier needs to be able to
+  // set their own hours (so chat/voice stop taking orders while closed),
+  // but a tenant_admin must never be able to touch any other field or any
+  // other tenant's row — only these three keys, only on their own tenant id.
+  if (auth.role === 'tenant_admin' && req.method === 'PATCH') {
+    const allowedFields = ['store_hours', 'store_timezone', 'voice_enabled'];
+    const requestedFields = Object.keys(req.body).filter((k) => k !== 'id');
+    const onlyAllowedFields = requestedFields.length > 0 && requestedFields.every((k) => allowedFields.includes(k));
+    if (!onlyAllowedFields) return res.status(403).json({ error: 'Super admin access required' });
+
+    const fields = {};
+    for (const key of allowedFields) if (key in req.body) fields[key] = req.body[key];
+
+    const { data, error } = await supabaseAdmin.from('tenants').update(fields).eq('id', auth.tenantId).select().single();
+    if (error) return res.status(500).json({ error: error.message });
+    return res.status(200).json({ tenant: data });
+  }
+
   if (auth.role !== 'super_admin') return res.status(403).json({ error: 'Super admin access required' });
 
   try {
