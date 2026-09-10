@@ -126,6 +126,21 @@ export default async function handler(req, res) {
 
   const auth = await verifyAuth(req);
   if (auth.error) return res.status(auth.status).json({ error: auth.error });
+
+  // Carve-out: a tenant_admin may fetch their OWN detail/usage report (used
+  // by their dashboard's Reports tab), but nothing else here — every other
+  // route (listing all tenants, creating/assigning, platform revenue, etc.)
+  // stays super_admin only. Force the id to their own tenant regardless of
+  // what was requested, so they can never pass someone else's.
+  if (auth.role === 'tenant_admin' && req.method === 'GET' && !req.query.plans && !req.query.revenue_report && !req.query.subscription_history && !req.query.include_inactive) {
+    try {
+      const detail = await getTenantDetail(auth.tenantId, req.query.date_from, req.query.date_to);
+      return res.status(200).json(detail);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
   if (auth.role !== 'super_admin') return res.status(403).json({ error: 'Super admin access required' });
 
   try {
