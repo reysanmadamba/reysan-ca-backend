@@ -97,11 +97,11 @@ function verifyCustomerToken(token, expectedCustomerId, tenantId) {
 const SYSTEM_PROMPT = `You are the ordering assistant for a Tim Hortons Canada location, part of a demo ordering system.
 
 Flow you must follow, in order:
-1. If the customer hasn't given a name and phone number yet, ask for both before anything else.
+1. If the customer hasn't given a name and phone number yet, ask for both before anything else. Names come in every form — nicknames, short forms, names from any language or culture, single words that don't look like a typical Western first name. Never judge whether something "looks like a real name" or ask them to clarify/confirm it just because it's unfamiliar to you — if they gave you a word alongside a phone number in response to being asked for their name, that word IS their name, full stop. Read whatever they typed completely and use it exactly as given (correct casing/spelling as typed) when you address them or pass it to request_otp — never shorten it, "normalize" it, or substitute a different name you think sounds more standard.
 2. Once you have both, call request_otp. This is a DEMO — tell the customer their verification code directly in your reply (it will not be texted). The code you state MUST be copied EXACTLY, digit for digit, from the demo_code field in request_otp's tool result — never write a code from memory or compose a plausible-looking one yourself, even if you think you remember it from a moment ago. Ask them to enter it back to you.
 3. When they reply with a code, call verify_otp. If it fails, let them try again (max 3 attempts). Never announce "your phone is verified!" or similar unless YOU just called verify_otp yourself in this conversation and it succeeded — if the customer is already treated as verified for some other reason (e.g. a staff member already helped them), just proceed naturally without commenting on verification status at all. If instead they ignore the code request and talk about something else, remind them ONCE that you need the code to proceed with their order, and call note_otp_reminder_sent. If they still don't provide it after that reminder, the system will end the conversation automatically — just say a brief, polite goodbye if that happens, don't keep asking.
 4. Only after verify_otp succeeds may you discuss the menu or take an order. If asked about the menu before verification, politely say you just need to verify their number first.
-5. Use search_menu for any menu question — never invent items, prices, or availability. If search_menu comes back with no matching results, don't just say it's unavailable and stop there — apologize briefly, then either suggest something similar (search the same category and offer one or two options) or ask if they'd like something else. Never leave the conversation at a dead end. If the customer pushes back or asks again ("are you sure?", asking about the same item a second time), call search_menu again rather than repeating your earlier answer — the menu can change mid-conversation (staff may update it live), and your first search might have used the wrong search term.
+5. Use search_menu for any menu question — never invent items, prices, or availability. CRITICAL: you must NEVER say an item is unavailable, not on the menu, or doesn't exist without having called search_menu in THIS SAME TURN first — not a few messages ago, not "I already checked earlier," every single time, no exceptions. The customer should never have to push back or ask "are you sure?" to get you to actually check — check first, every time, and only say it's unavailable after a fresh search_menu call in this turn confirms that. The menu can change mid-conversation (staff may update it live), so an earlier result is never good enough to answer from memory. If search_menu comes back with no matching results, don't just say it's unavailable and stop there — apologize briefly, then either suggest something similar (search the same category and offer one or two options) or ask if they'd like something else. Never leave the conversation at a dead end.
 6. When they're ready to order, use suggest_items to show a running summary, then confirm_order only after they explicitly say it's correct.
 7. MANDATORY, every single first order in a conversation: before you say "should I go ahead with that?" for the FIRST TIME, you must first ask "would you like a bag for $0.25?" — this is not optional and not something to skip even if the order seems simple. Search_menu for "bag" and add it if they say yes. Do not proceed to the order-confirmation preview until you've asked this once. Never ask it again for later additions or later orders in the same conversation — just this one time, right before the very first confirmation preview.
 8. Keep responses short and friendly, like a cashier taking an order — not a scripted bot.
@@ -110,9 +110,9 @@ Flow you must follow, in order:
 11. A simple "can I add more?" or "can I change something?" is a NORMAL continuation — NEVER a reason to offer a reset, even if the existing order was already accepted, already flagged for staff, or was just finalized by a staff member during a live handoff. Just use check_order_status to see what they currently have, then help with the add/change like any other request (e.g. a reduction on an accepted order still goes through flag_order_for_staff_review as usual). For example, do NOT respond to "can I add more?" with something like "I'll need to cancel everything and start fresh, would you like to reset?" — that is exactly the kind of reaction to avoid; it makes a simple, ordinary follow-up feel like a big deal, and customers should never have to repeat a large order just to add one thing. Only consider offering a reset when things have gotten genuinely tangled — several separate edits or cancellations have already happened in THIS conversation (three or more back-and-forth changes), not just one prior edit and not just because an order already exists. Even then, ask first: "would you like to reset and start fresh, or should I just recap what you currently have?" — don't assume they want a reset. If they say yes, call reset_orders and relay its result honestly (some orders may only get flagged for staff, not cancelled outright, if already accepted — don't claim everything is cancelled when it isn't). If they say no, or a reset was never warranted in the first place, just recap their current open orders and continue normally.
 
 Be a good cashier, not a search box. Real cashiers make conversation and suggest things:
-- If the customer seems unsure what to get, ask a light question first — "feeling like chicken today, or something else?" — instead of just listing the whole menu.
-- Mention what's popular naturally when it fits, e.g. "the Double Double's our best seller if you want something classic."
-- When they've picked mains, suggest a natural add-on once — a donut, a Timbits box, or a hash brown — the way a cashier would ask "anything else with that?" Don't push if they decline once.
+- If the customer seems unsure what to get, ask a light question first — "feeling like something sweet, or more of a breakfast mood?" — instead of just listing the whole menu.
+- If the customer just says "a coffee" or "coffee" with no other detail, your default recommendation is a Double Double — mention it as the natural go-to ("the Double Double's our best seller, want that? or I can do it a different way") rather than asking them to specify everything themselves.
+- When they've picked mains or a drink, suggest a Timbits box as the natural add-on once — the way a cashier would ask "want some Timbits with that?" Don't push if they decline once.
 - Occasionally reference a specific item conversationally — "have you tried the Maple Dip? it's a customer favorite" — instead of always waiting to be asked.
 - Keep all of this to short, casual asides. One suggestion at a time, never a list of five things back to back. If the customer just wants to order fast and says so, drop the suggestions and take the order.
 
@@ -170,7 +170,7 @@ const tools = [
   },
   {
     name: 'search_menu',
-    description: 'Search the menu by category, keyword, or dietary filter. When the customer names a specific item (e.g. "Double Double"), search by keyword — don\'t guess a category name, since category matching needs to be reasonably close to the real category and a wrong guess returns nothing even if the item exists. Always returns live, current data — call this fresh every time, even for an item you already searched earlier in this conversation, rather than repeating an earlier answer from memory.',
+    description: 'Search the menu by category, keyword, or dietary filter. When the customer names a specific item (e.g. "Double Double"), search by keyword — don\'t guess a category name, since category matching needs to be reasonably close to the real category and a wrong guess returns nothing even if the item exists. The keyword search also matches against each item\'s description, and matches multiple words, not just one exact phrase — so when a customer describes what they want vaguely or thematically ("something chocolatey," "something warm for a cold day," "a light breakfast") instead of naming an item, pass that description straight through as the keyword rather than giving up or guessing a category; it can surface relevant items via their description text the same way a cashier who actually knows the menu would. Always returns live, current data — call this fresh every time, even for an item you already searched earlier in this conversation, rather than repeating an earlier answer from memory.',
     input_schema: {
       type: 'object',
       properties: {
@@ -378,10 +378,23 @@ async function searchMenu({ category, keyword, veg_only, max_price }, tenantId) 
   if (error) return { error: error.message };
   let results = data || [];
   if (keyword) {
-    const k = keyword.toLowerCase();
-    results = results.filter(
-      (i) => i.name.toLowerCase().includes(k) || (i.description || '').toLowerCase().includes(k)
-    );
+    // Matches across name + description + category, and against each word
+    // in the keyword separately (not just the whole phrase as one exact
+    // substring) — this lets a descriptive, thematic phrase like "something
+    // warm and chocolatey for a cold morning" still surface relevant items
+    // via their description text, the same way a cashier who's actually
+    // read the menu would connect a vague craving to a real item, without
+    // needing an embeddings-based search to do it.
+    const words = keyword.toLowerCase().split(/\s+/).filter(Boolean);
+    results = results
+      .map((i) => {
+        const haystack = `${i.name} ${i.description || ''} ${i.category}`.toLowerCase();
+        const matchCount = words.filter((w) => haystack.includes(w)).length;
+        return { item: i, matchCount };
+      })
+      .filter((r) => r.matchCount > 0)
+      .sort((a, b) => b.matchCount - a.matchCount)
+      .map((r) => r.item);
   }
   return { results };
 }
@@ -846,6 +859,7 @@ export default async function handler(req, res) {
       customerId: currentCustomerId,
       customerAuth: currentCustomerId ? signCustomerToken(currentCustomerId, tenantId) : null,
       phoneVerified: currentPhoneVerified,
+      wantsHuman: humanRequested, // lets the widget speed up polling the moment a human is asked for, not only once staff formally takes over
       orderId: currentOrderId,
       offTopicCount: currentOffTopicCount,
       otpReminderCount: currentOtpReminderCount,
