@@ -54,6 +54,46 @@ function getClientIp(req) {
   return req.socket.remoteAddress || 'unknown';
 }
 
+// Security fix: the Turnstile session token (verifyToken, above import) only
+// proves "this is a rate-limited browser session" — it says nothing about
+// WHICH customer is talking. Previously customerId/phoneVerified/orderId
+// were read directly off the request body, so anyone could claim to be any
+// customer (skip OTP, edit another customer's info, tamper with another
+// customer's order). This second, separately-typed signed token proves the
+// caller actually holds the customerId it claims — issued once identity is
+// established (request_otp / flag_wants_human) and echoed back by the client
+// on every subsequent call instead of being trusted at face value. Kept
+// separate from the Turnstile token (different maxAge, different `type`)
+// so neither can be replayed as the other, and so a silent Turnstile
+// re-verify mid-conversation (which rotates sessionId) can't invalidate an
+// otherwise-still-valid customer identity.
+const CUSTOMER_AUTH_MAX_AGE_MS = 3 * 60 * 60 * 1000; // covers ordering + pickup wait
+
+function signCustomerToken(customerId, tenantId) {
+  const payload = { type: 'jollibee_customer', customerId, tenantId, issuedAt: Date.now() };
+  const b64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const hmac = crypto.createHmac('sha256', process.env.SESSION_HMAC_SECRET).update(b64).digest('base64url');
+  return `${b64}.${hmac}`;
+}
+
+function verifyCustomerToken(token, expectedCustomerId, tenantId) {
+  if (!token) return false;
+  try {
+    const [b64, hmac] = token.split('.');
+    const expected = crypto.createHmac('sha256', process.env.SESSION_HMAC_SECRET).update(b64).digest('base64url');
+    const a = Buffer.from(hmac);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+
+    const payload = JSON.parse(Buffer.from(b64, 'base64url').toString());
+    if (payload.type !== 'jollibee_customer') return false;
+    if (Date.now() - payload.issuedAt > CUSTOMER_AUTH_MAX_AGE_MS) return false;
+    return payload.customerId === expectedCustomerId && payload.tenantId === tenantId;
+  } catch {
+    return false;
+  }
+}
+
 const SYSTEM_PROMPT = `You are the ordering assistant for a Jollibee Canada location, part of a demo ordering system.
 
 Flow you must follow, in order:
@@ -504,7 +544,11 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const clientIp = getClientIp(req);
-  const { message, history = [], token, customerId, phoneVerified, orderId, offTopicCount, otpReminderCount, guestInfoReminderCount } = req.body;
+  const {
+    message, history = [], token,
+    customerId: claimedCustomerId, customerAuth, orderId: claimedOrderId,
+    offTopicCount, otpReminderCount, guestInfoReminderCount
+  } = req.body;
 
   // verify the Turnstile-issued session token before anything else
   const session = verifyToken(token);
@@ -515,13 +559,24 @@ export default async function handler(req, res) {
   const tenantId = tenant.id;
   const activeProvider = tenant.aiProvider; // per-tenant switch, no redeploy needed to change it
 
+  // A client-claimed customerId is only trusted once its accompanying
+  // customerAuth proves the caller was actually issued that identity by this
+  // backend (see verifyCustomerToken above) — otherwise anyone could act as
+  // or read any other customer just by sending their UUID. Falls back to
+  // "no identity yet" (same as a brand-new visitor) if the check fails,
+  // rather than erroring, so a stale/missing token just re-starts the flow.
+  const customerId = (claimedCustomerId && verifyCustomerToken(customerAuth, claimedCustomerId, tenantId))
+    ? claimedCustomerId
+    : null;
+  const orderId = customerId ? (claimedOrderId || null) : null;
+
   // Fetch the customer's current state once, up front — used to decide
   // whether they're mid-takeover AND whether the off-topic penalty should
   // apply at all. Someone who's asked for a human shouldn't get their chat
   // closed for "going off topic" while they wait — that's backwards.
   let customerState = null;
   if (customerId) {
-    const { data } = await supabase.from('customers').select('takeover_active, wants_human, phone_verified, phone, name').eq('id', customerId).maybeSingle();
+    const { data } = await supabase.from('customers').select('takeover_active, wants_human, phone_verified, phone, name').eq('id', customerId).eq('tenant_id', tenantId).maybeSingle();
     customerState = data;
     supabase.from('customers').update({ last_active_at: new Date().toISOString() }).eq('id', customerId).then(() => { }); // fire-and-forget, not on the critical path
   }
@@ -573,6 +628,7 @@ export default async function handler(req, res) {
         .select('order_number, status, eta_minutes, accepted_at, total, items, cancellation_reason')
         .eq('id', orderId)
         .eq('tenant_id', tenantId)
+        .eq('customer_id', customerId)
         .maybeSingle();
       if (order) {
         statusPayload = {
@@ -621,7 +677,15 @@ export default async function handler(req, res) {
       sender: 'customer',
       message
     });
-    return res.status(200).json({ reply: null, takeoverActive: true, customerId, phoneVerified, orderId, offTopicCount });
+    return res.status(200).json({
+      reply: null,
+      takeoverActive: true,
+      customerId,
+      customerAuth: customerId ? signCustomerToken(customerId, tenantId) : null,
+      phoneVerified: customerState?.phone_verified || false,
+      orderId,
+      offTopicCount
+    });
   }
 
   // Fix #9: ban check uses the corrected IP from fix #1
@@ -653,7 +717,9 @@ export default async function handler(req, res) {
 
   const messages = [...history, { role: 'user', content: message }];
   let currentCustomerId = customerId || null;
-  let currentPhoneVerified = phoneVerified || customerState?.phone_verified || false;
+  // Never trust the client's own phoneVerified claim — always re-derive it
+  // fresh from the DB, which is what actually gets set by verify_otp.
+  let currentPhoneVerified = customerState?.phone_verified || false;
   let currentOrderId = orderId || null;
   let currentOffTopicCount = offTopicCount || 0;
   let currentOtpReminderCount = otpReminderCount || 0;
@@ -777,6 +843,7 @@ export default async function handler(req, res) {
       reply: replyText,
       history: messages, // mutated in place by whichever provider loop ran
       customerId: currentCustomerId,
+      customerAuth: currentCustomerId ? signCustomerToken(currentCustomerId, tenantId) : null,
       phoneVerified: currentPhoneVerified,
       orderId: currentOrderId,
       offTopicCount: currentOffTopicCount,
