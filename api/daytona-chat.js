@@ -263,8 +263,9 @@ const tools = [
       type: 'object',
       properties: {
         city: { type: 'string', description: 'Required — Edmonton, Calgary, or Winnipeg (Daytona\'s only three regions).' },
-        min_price: { type: 'number', description: 'Minimum price in CAD, GST included.' },
-        max_price: { type: 'number', description: 'Maximum price in CAD, GST included.' },
+        exact_price: { type: 'number', description: 'Use this INSTEAD of min_price/max_price when the visitor gives one specific dollar figure rather than a range (e.g. they read a price off a listing, or off daytonahomes.ca directly) — matches that exact GST-included price (or pre-GST price, whichever they gave). Combined with community, this narrows to a single listing in the large majority of cases — see the EXACT PRICE rule in your instructions for when to ask for community too.' },
+        min_price: { type: 'number', description: 'Minimum price in CAD, GST included. Do not combine with exact_price.' },
+        max_price: { type: 'number', description: 'Maximum price in CAD, GST included. Do not combine with exact_price.' },
         min_beds: { type: 'number' },
         max_beds: { type: 'number' },
         community: { type: 'string', description: 'Optional community/neighbourhood name to filter by, e.g. "Chappelle Gardens".' },
@@ -286,7 +287,7 @@ const openaiTools = tools.map((t) => ({
   function: { name: t.name, description: t.description, parameters: t.input_schema }
 }));
 
-function searchListings({ city, min_price, max_price, min_beds, max_beds, community, near_school, near_grocery, near_gym, possession, limit } = {}) {
+function searchListings({ city, exact_price, min_price, max_price, min_beds, max_beds, community, near_school, near_grocery, near_gym, possession, limit } = {}) {
   if (!city) return { error: 'city is required (Edmonton, Calgary, or Winnipeg)' };
   const cap = Math.min(Math.max(limit || 10, 1), 12);
 
@@ -294,6 +295,10 @@ function searchListings({ city, min_price, max_price, min_beds, max_beds, commun
     if (l.city.toLowerCase() !== String(city).toLowerCase()) return false;
     if (community && !l.community.toLowerCase().includes(String(community).toLowerCase())) return false;
     const price = l.priceGst ?? l.price;
+    const prePrice = l.pricePreGst ?? null;
+    // Matches either price field — the visitor may have read the GST or
+    // pre-GST figure off the site, and there's no way to know which.
+    if (exact_price != null && price !== exact_price && prePrice !== exact_price) return false;
     if (min_price != null && (price == null || price < min_price)) return false;
     if (max_price != null && (price == null || price > max_price)) return false;
     if (min_beds != null && l.beds < min_beds) return false;
@@ -357,7 +362,9 @@ FACTS YOU KNOW (do not go beyond these; if asked something not covered, say some
 DEMO CUSTOMER SERVICE CONTACT — if a visitor wants to speak to a real person, has a question this demo can't answer, or you're using the fallback line above, offer this in addition: this demo's support contact is contact@reysan.ca, monitored weekdays 8am-5pm. If it's currently outside those hours, say so honestly (something like "it's outside our demo support hours right now, so a reply might take a bit, but you're welcome to email anyway") — don't pretend someone will respond instantly outside business hours, but don't discourage them from trying either. For real Daytona warranty or sales questions specifically, still give the real regional phone number/email from FACTS above as the primary contact — contact@reysan.ca is only for questions about this AI demo itself, not a substitute for Daytona's actual customer service.
 - Listings are real, live data pulled directly from daytonahomes.ca — not fictional placeholders — searched through the search_listings tool rather than pasted here, since Edmonton alone currently has 146 of them. That said, real listings change (sale pending, sold, new ones posted) faster than this demo dataset refreshes, so mention that current availability should be confirmed directly on daytonahomes.ca or with Daytona.
 
-LISTINGS TOOL — call search_listings whenever a visitor asks about specific homes, prices, or availability. Always call it fresh, even for something you already searched earlier in this conversation — never answer from memory or invent a listing. It requires "city" and takes optional min_price/max_price (GST-included), min_beds/max_beds, community, near_school/near_grocery/near_gym, and possession. The near_school/near_grocery/near_gym flags are placeholder demo data, not verified proximity — if asked, say proximity search is a preview/demo feature and the flag is illustrative, not a guarantee. Each result includes priceGst and, when available, pricePreGst — mention the pre-GST figure too if a visitor asks about it. A result with salePending: true has no price yet — say it's currently sale pending rather than quoting a price.
+LISTINGS TOOL — call search_listings whenever a visitor asks about specific homes, prices, or availability. Always call it fresh, even for something you already searched earlier in this conversation — never answer from memory or invent a listing. It requires "city" and takes optional exact_price, min_price/max_price (GST-included), min_beds/max_beds, community, near_school/near_grocery/near_gym, and possession. The near_school/near_grocery/near_gym flags are placeholder demo data, not verified proximity — if asked, say proximity search is a preview/demo feature and the flag is illustrative, not a guarantee. Each result includes priceGst and, when available, pricePreGst — mention the pre-GST figure too if a visitor asks about it. A result with salePending: true has no price yet — say it's currently sale pending rather than quoting a price.
+
+EXACT PRICE — if a visitor gives ONE specific dollar figure instead of a range or ceiling (compare: "$479,899" vs. "under $500k" or "$400k-500k"), that's almost always them trying to find a specific home they already saw, not describing a budget. Use exact_price instead of min_price/max_price. Before searching, ask one quick follow-up: "Do you have a specific community in mind?" — community plus exact price narrows to a single listing in the large majority of cases; without a community it can still return two or three (Daytona reuses the same floor plan across different lots in a community, so identical price/beds/baths/sqft/possession can genuinely exist on more than one address — that's not a search error, just be upfront about it: "A couple of homes match that exact price in [community] — here they are" rather than picking one arbitrarily). There is no way to search by street address or listing name directly — if a visitor gives you an address instead of a price, tell them address lookup isn't supported in this demo and ask for a price or other detail (city, budget, beds, community) instead.
 
 RESULT COUNT — after calling search_listings, always tell the visitor how many results came back (totalMatches) before listing anything, and let THEM choose how many to see rather than deciding for them. If totalMatches is more than about 5, say something like: "I've pulled [totalMatches] results based on your search — do you want me to show you everything, or just the top 5 that best match what you're looking for?" and wait for their answer.
 - If they want just the top few, list up to 5 from what you already have (sorted cheapest first, already the default order).
@@ -366,10 +373,10 @@ RESULT COUNT — after calling search_listings, always tell the visitor how many
 
 GUIDED INTAKE FLOW — if a visitor says they're looking for a home, wants a recommendation, or otherwise signals home-shopping intent (not just a general FAQ question), walk them through these four questions ONE AT A TIME, waiting for their answer before asking the next. Don't dump all four at once.
 1. "Which city are you looking to build or buy in?" — Daytona operates in Greater Edmonton, Greater Calgary, and Winnipeg. If they name anywhere outside those three, respond with something like "We only build in Greater Edmonton, Greater Calgary, and Winnipeg — would one of those work?" and don't move to the next question until they confirm one.
-2. "What's your budget?"
+2. "What's your budget?" — if they answer with a range or ceiling (e.g. "under $500k", "$400k-500k"), that's max_price/min_price as usual, move on to question 3. If they instead give ONE specific dollar figure, follow the EXACT PRICE rule above (ask about community) before continuing.
 3. "How many bedrooms are you looking for?"
 4. "Is there anything specific you'd like — for example, close to a school, grocery store, or gym?"
-Once all four are answered, call search_listings with city, max_price from their budget, min_beds from their bedroom count, and near_school/near_grocery/near_gym if their fourth answer matches one of those — then recommend 1-3 of the returned listings. If a visitor volunteers several of these in one message, don't re-ask what they already gave you — just fill in whichever are still missing, then search.
+Once all four are answered, call search_listings with city, price info from their budget answer (exact_price+community, or max_price — whichever applies per question 2), min_beds from their bedroom count, and near_school/near_grocery/near_gym if their fourth answer matches one of those — then recommend 1-3 of the returned listings. If a visitor volunteers several of these in one message, don't re-ask what they already gave you — just fill in whichever are still missing, then search.
 5. Whenever you suggest or recommend a specific listing to the user, share its direct listing page using the "url" field from that listing's data, in plain text like: "You can view the full listing here: [url]"
 
 Leave one blank line after the listing details, then ask on its own line: "Want to see how sunlight and shadows move across this property throughout the day?"
