@@ -317,6 +317,7 @@ function searchListings({ city, exact_price, min_price, max_price, min_beds, max
 
   let matches = filterListings(args);
   let exactPriceFallback = false;
+  let nearestAlternative = null;
 
   // An exact_price search that finds nothing is a dead end for the
   // visitor — widen it automatically rather than making the AI decide to
@@ -332,33 +333,66 @@ function searchListings({ city, exact_price, min_price, max_price, min_beds, max
     exactPriceFallback = matches.length > 0;
   }
 
+  const formatListing = (l) => ({
+    city: l.city,
+    community: l.community,
+    address: l.address,
+    beds: l.beds,
+    baths: l.baths,
+    sqft: l.sqft,
+    priceGst: l.priceGst ?? l.price ?? null,
+    pricePreGst: l.pricePreGst ?? null,
+    salePending: (l.priceGst ?? l.price) == null,
+    possession: l.possession,
+    features: l.features,
+    nearSchool: l.nearSchool,
+    nearGrocery: l.nearGrocery,
+    nearGym: l.nearGym,
+    url: l.url,
+    lat: l.lat,
+    lng: l.lng,
+    geocodePrecision: l.geocodePrecision
+  });
+
+  // Still nothing (even after the ±$50k widening, or the original search
+  // had no price at all — e.g. a community/bed combo that just doesn't
+  // exist) — rather than a dead end, drop every price constraint and find
+  // what IS available in that city/community/beds scope, so the AI has
+  // real numbers and real listings to build a concrete alternative
+  // suggestion from instead of guessing or inventing one. Kept separate
+  // from totalMatches/listings below — these are alternatives, not
+  // matches to what was actually asked for, and shouldn't be presented
+  // as if they were.
+  if (matches.length === 0) {
+    const broader = filterListings({ city, community, min_beds, max_beds, near_school, near_grocery, near_gym, possession });
+    if (broader.length > 0) {
+      const referencePrice = exact_price ?? (min_price != null && max_price != null ? (min_price + max_price) / 2 : max_price ?? min_price ?? null);
+      const sorted = broader.slice().sort((a, b) => {
+        const priceA = a.priceGst ?? a.price;
+        const priceB = b.priceGst ?? b.price;
+        if (referencePrice == null) return (priceA ?? Infinity) - (priceB ?? Infinity); // cheapest first if no price reference at all
+        return Math.abs((priceA ?? Infinity) - referencePrice) - Math.abs((priceB ?? Infinity) - referencePrice);
+      });
+      const suggestedPrice = sorted[0].priceGst ?? sorted[0].price;
+      nearestAlternative = {
+        suggestedPrice,
+        listingsAtSuggestedPrice: broader.filter((l) => (l.priceGst ?? l.price) === suggestedPrice).length,
+        totalAvailableInScope: broader.length,
+        immediatePossessionCount: broader.filter((l) => (l.possession || '').toLowerCase() === 'immediate').length,
+        sampleListings: sorted.slice(0, 3).map(formatListing)
+      };
+    }
+  }
+
   const totalMatches = matches.length;
   const shown = matches
     .slice()
     .sort((a, b) => (a.priceGst ?? a.price ?? Infinity) - (b.priceGst ?? b.price ?? Infinity))
     .slice(0, cap)
-    .map((l) => ({
-      city: l.city,
-      community: l.community,
-      address: l.address,
-      beds: l.beds,
-      baths: l.baths,
-      sqft: l.sqft,
-      priceGst: l.priceGst ?? l.price ?? null,
-      pricePreGst: l.pricePreGst ?? null,
-      salePending: (l.priceGst ?? l.price) == null,
-      possession: l.possession,
-      features: l.features,
-      nearSchool: l.nearSchool,
-      nearGrocery: l.nearGrocery,
-      nearGym: l.nearGym,
-      url: l.url,
-      lat: l.lat,
-      lng: l.lng,
-      geocodePrecision: l.geocodePrecision
-    }));
+    .map(formatListing);
 
   const result = { totalMatches, shown: shown.length, listings: shown };
+  if (nearestAlternative) result.nearestAlternative = nearestAlternative;
   if (exactPriceFallback) {
     result.exactPriceFallback = true;
     result.fallbackRangeMin = exact_price - EXACT_PRICE_FALLBACK_RANGE;
@@ -393,7 +427,8 @@ DEMO CUSTOMER SERVICE CONTACT — if a visitor wants to speak to a real person, 
 LISTINGS TOOL — call search_listings whenever a visitor asks about specific homes, prices, or availability. Always call it fresh, even for something you already searched earlier in this conversation — never answer from memory or invent a listing. It requires "city" and takes optional exact_price, min_price/max_price (GST-included), min_beds/max_beds, community, near_school/near_grocery/near_gym, and possession. The near_school/near_grocery/near_gym flags are placeholder demo data, not verified proximity — if asked, say proximity search is a preview/demo feature and the flag is illustrative, not a guarantee. Each result includes priceGst and, when available, pricePreGst — mention the pre-GST figure too if a visitor asks about it. A result with salePending: true has no price yet — say it's currently sale pending rather than quoting a price.
 
 EXACT PRICE — if a visitor gives ONE specific dollar figure instead of a range or ceiling (compare: "$479,899" vs. "under $500k" or "$400k-500k"), that's almost always them trying to find a specific home they already saw, not describing a budget. Use exact_price instead of min_price/max_price. Before searching, ask one quick follow-up: "Do you have a specific community in mind?" — community plus exact price narrows to a single listing in the large majority of cases; without a community it can still return two or three (Daytona reuses the same floor plan across different lots in a community, so identical price/beds/baths/sqft/possession can genuinely exist on more than one address — that's not a search error, just be upfront about it: "A couple of homes match that exact price in [community] — here they are" rather than picking one arbitrarily). There is no way to search by street address or listing name directly — if a visitor gives you an address instead of a price, tell them address lookup isn't supported in this demo and ask for a price or other detail (city, budget, beds, community) instead.
-- If an exact_price search comes back with exactPriceFallback: true in the result, that means nothing matched that exact figure so the tool automatically widened to fallbackRangeMin-fallbackRangeMax (±$50k) and these ARE those wider results — say so plainly, e.g. "Nothing at exactly $504,519, but here's what's within $50k of that" — never present a fallback result as if it matched the exact price. If totalMatches is still 0 even after the fallback, say so honestly and suggest a wider budget or a different community rather than the fallback line above.
+- If an exact_price search comes back with exactPriceFallback: true in the result, that means nothing matched that exact figure so the tool automatically widened to fallbackRangeMin-fallbackRangeMax (±$50k) and these ARE those wider results — say so plainly, e.g. "Nothing at exactly $504,519, but here's what's within $50k of that" — never present a fallback result as if it matched the exact price.
+- If totalMatches is 0 (even after the ±$50k widening above), check the result for a nearestAlternative object before falling back to the generic "use the fallback line" rule — it means the tool found real, currently-available listings once every price constraint was dropped from your search (same city/community/beds, any price), which is enough to make a concrete, specific suggestion instead of a dead end. Use its numbers directly, something like: "Nothing at that price in [community], but there's [totalAvailableInScope] homes available there overall — the closest price point is $[suggestedPrice] ([listingsAtSuggestedPrice] at that price), and [immediatePossessionCount] have immediate possession if timing matters to you. Want me to show you those?" Only recommend specific addresses from nearestAlternative.sampleListings if the visitor says yes — don't dump them unprompted. If nearestAlternative is absent too (nothing at all exists in that city/community/bed combo), that's genuinely nothing to work with — use the fallback line and suggest they try a different community or contact Daytona directly.
 
 RESULT COUNT — after calling search_listings, always tell the visitor how many results came back (totalMatches) before listing anything, and let THEM choose how many to see rather than deciding for them. If totalMatches is more than about 5, say something like: "I've pulled [totalMatches] results based on your search — do you want me to show you everything, or just the top 5 that best match what you're looking for?" and wait for their answer.
 - If they want just the top few, list up to 5 from what you already have (sorted cheapest first, already the default order).
