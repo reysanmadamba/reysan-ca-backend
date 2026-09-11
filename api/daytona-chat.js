@@ -258,7 +258,7 @@ const LISTINGS = [
 const tools = [
   {
     name: 'search_listings',
-    description: 'Search Daytona Homes\' current move-in-ready listings. Always call this fresh whenever a visitor asks about specific homes, prices, or availability — never answer from memory or an earlier call in this conversation, since results can change. Returns the cheapest matches first, capped at "limit" (default 5, max 8) — if totalMatches is higher than "shown", mention that more are available and offer to narrow it down.',
+    description: 'Search Daytona Homes\' current move-in-ready listings. Always call this fresh whenever a visitor asks about specific homes, prices, or availability — never answer from memory or an earlier call in this conversation, since results can change. Always returns 5 at a time (closest/cheapest matches first) — never more, there is no way to fetch every match in one call. Use "offset" to page through further batches (0, 5, 10, ...) only once the visitor asks to see more; see the RESULT COUNT rule in your instructions for exactly how to offer and paginate this.',
     input_schema: {
       type: 'object',
       properties: {
@@ -273,7 +273,8 @@ const tools = [
         near_grocery: { type: 'boolean' },
         near_gym: { type: 'boolean' },
         possession: { type: 'string', description: 'Optional possession timing keyword, e.g. "immediate", "november", "2027".' },
-        limit: { type: 'number', description: 'Max listings to return, default 10, max 12. Ask the visitor whether they want everything or just the top few before deciding how many to actually list out — see the LISTINGS TOOL rule in your instructions.' }
+        limit: { type: 'number', description: 'Max listings to return in this call, default 5, max 5 — always show results 5 at a time, never more; see the RESULT COUNT rule in your instructions.' },
+        offset: { type: 'number', description: 'Skip this many of the sorted matches before taking "limit" — use this to fetch the NEXT batch of 5 after the visitor has already seen an earlier batch (e.g. offset 5 for results 6-10), never to re-fetch ones already shown.' }
       },
       required: ['city']
     }
@@ -310,9 +311,12 @@ function filterListings({ city, exact_price, min_price, max_price, min_beds, max
   });
 }
 
-function searchListings({ city, exact_price, min_price, max_price, min_beds, max_beds, community, near_school, near_grocery, near_gym, possession, limit } = {}) {
+function searchListings({ city, exact_price, min_price, max_price, min_beds, max_beds, community, near_school, near_grocery, near_gym, possession, limit, offset } = {}) {
   if (!city) return { error: 'city is required (Edmonton, Calgary, or Winnipeg)' };
-  const cap = Math.min(Math.max(limit || 10, 1), 12);
+  // Hard-capped at 5 — results are always shown in batches, never as one
+  // big dump, regardless of what the model asks for.
+  const cap = Math.min(Math.max(limit || 5, 1), 5);
+  const skip = Math.max(offset || 0, 0);
   const args = { city, exact_price, min_price, max_price, min_beds, max_beds, community, near_school, near_grocery, near_gym, possession };
 
   let matches = filterListings(args);
@@ -391,17 +395,15 @@ function searchListings({ city, exact_price, min_price, max_price, min_beds, max
   // match (e.g. a home $1 away could lose to ones $40k away). Any other
   // search (a real budget range, or no price at all) sorts cheapest-first
   // as before, since there's no single target price to measure against.
-  const shown = matches
-    .slice()
-    .sort(
-      exact_price != null
-        ? (a, b) => Math.abs((a.priceGst ?? a.price ?? Infinity) - exact_price) - Math.abs((b.priceGst ?? b.price ?? Infinity) - exact_price)
-        : (a, b) => (a.priceGst ?? a.price ?? Infinity) - (b.priceGst ?? b.price ?? Infinity)
-    )
-    .slice(0, cap)
-    .map(formatListing);
+  const sortedMatches = matches.slice().sort(
+    exact_price != null
+      ? (a, b) => Math.abs((a.priceGst ?? a.price ?? Infinity) - exact_price) - Math.abs((b.priceGst ?? b.price ?? Infinity) - exact_price)
+      : (a, b) => (a.priceGst ?? a.price ?? Infinity) - (b.priceGst ?? b.price ?? Infinity)
+  );
+  const shown = sortedMatches.slice(skip, skip + cap).map(formatListing);
+  const hasMore = skip + shown.length < totalMatches;
 
-  const result = { totalMatches, shown: shown.length, listings: shown };
+  const result = { totalMatches, shown: shown.length, hasMore, listings: shown };
   if (nearestAlternative) result.nearestAlternative = nearestAlternative;
   if (exactPriceFallback) {
     result.exactPriceFallback = true;
@@ -440,10 +442,11 @@ EXACT PRICE — if a visitor gives ONE specific dollar figure instead of a range
 - If an exact_price search comes back with exactPriceFallback: true in the result, that means nothing matched that exact figure so the tool automatically widened to fallbackRangeMin-fallbackRangeMax and these ARE those wider results — say so plainly, stating the actual dollar range rather than "±$50k" (a visitor shouldn't have to do that math themselves): "Nothing at exactly $504,519, but I found [totalMatches] Edmonton homes between $[fallbackRangeMin] and $[fallbackRangeMax]." Never present a fallback result as if it matched the exact price, and never say "within $50,000 of that price" — always spell out the two actual dollar figures.
 - If totalMatches is 0 (even after the ±$50k widening above), check the result for a nearestAlternative object before falling back to the generic "use the fallback line" rule — it means the tool found real, currently-available listings once every price constraint was dropped from your search (same city/community/beds, any price), which is enough to make a concrete, specific suggestion instead of a dead end. Use its numbers directly, something like: "Nothing at that price in [community], but there's [totalAvailableInScope] homes available there overall — the closest price point is $[suggestedPrice] ([listingsAtSuggestedPrice] at that price), and [immediatePossessionCount] have immediate possession if timing matters to you. Want me to show you those?" Only recommend specific addresses from nearestAlternative.sampleListings if the visitor says yes — don't dump them unprompted. If nearestAlternative is absent too (nothing at all exists in that city/community/bed combo), that's genuinely nothing to work with — use the fallback line and suggest they try a different community or contact Daytona directly.
 
-RESULT COUNT — after calling search_listings, always tell the visitor how many results came back (totalMatches) before listing anything, and let THEM choose how many to see rather than deciding for them. If totalMatches is more than about 5, say something like: "I've pulled [totalMatches] results based on your search — do you want me to show you everything, or just the top 5 that best match what you're looking for?" and wait for their answer.
-- If they want just the top few, list up to 5 from what you already have (sorted cheapest first, already the default order).
-- If they want everything and totalMatches is more than what's shown (the tool caps a single call at 12), call search_listings again with the same filters and limit set to totalMatches (or 12, whichever is smaller) so you actually have all of them before listing.
-- If totalMatches is 5 or fewer, just list them directly — no need to ask first when there's nothing to narrow down.
+RESULT COUNT — search_listings always returns results 5 at a time (the tool hard-caps "limit" at 5) — there is no way to fetch or show "everything" in one shot, and you should never offer to. After every call, state totalMatches, then show this batch (up to 5) as the top/most relevant matches — don't ask permission first, just show them, something like: "I found [totalMatches] listings — here are the top 5 most relevant:" followed by the numbered list.
+- If hasMore is true in the result, end that reply by offering the next batch, not "everything": "Want to see 5 more?" If they say yes, call search_listings again with the same filters and offset increased by 5 (0 → 5 → 10 ...) to get the next batch — never re-show ones already shown, and never claim you can pull the full totalMatches count at once.
+- If hasMore is false (this batch is the last of them), don't offer more — there isn't any.
+- If totalMatches is 5 or fewer, this is just the one and only batch — no "want more" offer needed.
+- Don't re-explain a search you already explained earlier in this conversation. If a visitor asks to see the same search again (e.g. "just show me the top 5" after you already said "nothing at exactly $X, here's the $A-$B range"), skip straight to the numbered list — no need to repeat the "nothing at exactly..." or exactPriceFallback preamble a second time for a search you already covered.
 
 GUIDED INTAKE FLOW — if a visitor says they're looking for a home, wants a recommendation, or otherwise signals home-shopping intent (not just a general FAQ question), walk them through these four questions ONE AT A TIME, waiting for their answer before asking the next. Don't dump all four at once.
 1. "Which city are you looking to build or buy in?" — Daytona operates in Greater Edmonton, Greater Calgary, and Winnipeg. If they name anywhere outside those three, respond with something like "We only build in Greater Edmonton, Greater Calgary, and Winnipeg — would one of those work?" and don't move to the next question until they confirm one.
@@ -453,9 +456,18 @@ GUIDED INTAKE FLOW — if a visitor says they're looking for a home, wants a rec
 Once all four are answered, call search_listings with city, price info from their budget answer (exact_price+community, or max_price — whichever applies per question 2), min_beds from their bedroom count, and near_school/near_grocery/near_gym if their fourth answer matches one of those — then recommend 1-3 of the returned listings. If a visitor volunteers several of these in one message, don't re-ask what they already gave you — just fill in whichever are still missing, then search.
 5. Whenever you suggest or recommend a specific listing to the user, share its direct listing page using the "url" field from that listing's data, in plain text like: "You can view the full listing here: [url]"
 
-Leave one blank line after the listing details, then ask on its own line: "Want to see how sunlight and shadows move across this property throughout the day?"
+When you list TWO OR MORE homes in the same reply, number them (1. 2. 3. ...) in the order you list them — this is what lets the visitor refer back to "the 2nd one" or "#3" instead of retyping an address, and it's how you resolve the shadow-check question below without ambiguity.
 
-If they say yes, use that listing's "lat" and "lng" fields to build this link:
+Leave one blank line after the listing details, then ask the shadow-check question on its own line, phrased differently depending on how many homes you just listed:
+- Exactly ONE listing: "Want to see how sunlight and shadows move across this property throughout the day?"
+- TWO OR MORE listings: "Want to see how sunlight and shadows move across any of these? Tell me the number, or say 'all' to see all of them."
+
+Resolving the answer:
+- If they name one or more numbers (e.g. "2", "1 and 3", "the second one"), share the shadow-check link for only those specific listings — call search_listings again FIRST with the exact same parameters you used to produce that numbered list (same city/price/beds/community/etc.) so you have fresh lat/lng to work with, then match the number(s) to that position in the results (1st, 2nd, ...) in the same order, which will be the same homes since results are always returned in a consistent order for the same search.
+- If they say "all" or otherwise agree without naming a number, share shadow-check links for the listings you actually showed them (not the full totalMatches count) — cap at 5 even if more were shown.
+- If they say yes/sure without it being clear which one (this should mostly only happen when exactly one was shown), treat it as that one listing.
+
+For each listing you share a shadow-check link for, use that listing's "lat" and "lng" fields to build this link:
 https://reysan.ca/daytona/shadow-check.html?lat=[lat]&lng=[lng]
 If a listing's "geocodePrecision" field is "community" or "city" rather than "address", you can still share the link, but mention that the sun/shadow view is centered on the general neighborhood rather than the exact lot, since exact address-level location data wasn't available for that one.
 Do not fabricate shadow, sunlight, or coordinate claims yourself — only use the lat/lng values actually present in a search_listings result, and never guess or invent coordinates for a listing that's missing them.
