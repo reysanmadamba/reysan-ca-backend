@@ -287,11 +287,10 @@ const openaiTools = tools.map((t) => ({
   function: { name: t.name, description: t.description, parameters: t.input_schema }
 }));
 
-function searchListings({ city, exact_price, min_price, max_price, min_beds, max_beds, community, near_school, near_grocery, near_gym, possession, limit } = {}) {
-  if (!city) return { error: 'city is required (Edmonton, Calgary, or Winnipeg)' };
-  const cap = Math.min(Math.max(limit || 10, 1), 12);
+const EXACT_PRICE_FALLBACK_RANGE = 50000; // ±$50k, only used when an exact_price search finds nothing
 
-  const matches = LISTINGS.filter((l) => {
+function filterListings({ city, exact_price, min_price, max_price, min_beds, max_beds, community, near_school, near_grocery, near_gym, possession }) {
+  return LISTINGS.filter((l) => {
     if (l.city.toLowerCase() !== String(city).toLowerCase()) return false;
     if (community && !l.community.toLowerCase().includes(String(community).toLowerCase())) return false;
     const price = l.priceGst ?? l.price;
@@ -309,6 +308,29 @@ function searchListings({ city, exact_price, min_price, max_price, min_beds, max
     if (possession && !(l.possession || '').toLowerCase().includes(String(possession).toLowerCase())) return false;
     return true;
   });
+}
+
+function searchListings({ city, exact_price, min_price, max_price, min_beds, max_beds, community, near_school, near_grocery, near_gym, possession, limit } = {}) {
+  if (!city) return { error: 'city is required (Edmonton, Calgary, or Winnipeg)' };
+  const cap = Math.min(Math.max(limit || 10, 1), 12);
+  const args = { city, exact_price, min_price, max_price, min_beds, max_beds, community, near_school, near_grocery, near_gym, possession };
+
+  let matches = filterListings(args);
+  let exactPriceFallback = false;
+
+  // An exact_price search that finds nothing is a dead end for the
+  // visitor — widen it automatically rather than making the AI decide to
+  // retry (and possibly not bother). The flag below tells the prompt to
+  // be upfront that these are nearby, not exact, matches.
+  if (exact_price != null && matches.length === 0) {
+    matches = filterListings({
+      ...args,
+      exact_price: undefined,
+      min_price: exact_price - EXACT_PRICE_FALLBACK_RANGE,
+      max_price: exact_price + EXACT_PRICE_FALLBACK_RANGE
+    });
+    exactPriceFallback = matches.length > 0;
+  }
 
   const totalMatches = matches.length;
   const shown = matches
@@ -336,7 +358,13 @@ function searchListings({ city, exact_price, min_price, max_price, min_beds, max
       geocodePrecision: l.geocodePrecision
     }));
 
-  return { totalMatches, shown: shown.length, listings: shown };
+  const result = { totalMatches, shown: shown.length, listings: shown };
+  if (exactPriceFallback) {
+    result.exactPriceFallback = true;
+    result.fallbackRangeMin = exact_price - EXACT_PRICE_FALLBACK_RANGE;
+    result.fallbackRangeMax = exact_price + EXACT_PRICE_FALLBACK_RANGE;
+  }
+  return result;
 }
 
 // ============================================================
@@ -365,6 +393,7 @@ DEMO CUSTOMER SERVICE CONTACT — if a visitor wants to speak to a real person, 
 LISTINGS TOOL — call search_listings whenever a visitor asks about specific homes, prices, or availability. Always call it fresh, even for something you already searched earlier in this conversation — never answer from memory or invent a listing. It requires "city" and takes optional exact_price, min_price/max_price (GST-included), min_beds/max_beds, community, near_school/near_grocery/near_gym, and possession. The near_school/near_grocery/near_gym flags are placeholder demo data, not verified proximity — if asked, say proximity search is a preview/demo feature and the flag is illustrative, not a guarantee. Each result includes priceGst and, when available, pricePreGst — mention the pre-GST figure too if a visitor asks about it. A result with salePending: true has no price yet — say it's currently sale pending rather than quoting a price.
 
 EXACT PRICE — if a visitor gives ONE specific dollar figure instead of a range or ceiling (compare: "$479,899" vs. "under $500k" or "$400k-500k"), that's almost always them trying to find a specific home they already saw, not describing a budget. Use exact_price instead of min_price/max_price. Before searching, ask one quick follow-up: "Do you have a specific community in mind?" — community plus exact price narrows to a single listing in the large majority of cases; without a community it can still return two or three (Daytona reuses the same floor plan across different lots in a community, so identical price/beds/baths/sqft/possession can genuinely exist on more than one address — that's not a search error, just be upfront about it: "A couple of homes match that exact price in [community] — here they are" rather than picking one arbitrarily). There is no way to search by street address or listing name directly — if a visitor gives you an address instead of a price, tell them address lookup isn't supported in this demo and ask for a price or other detail (city, budget, beds, community) instead.
+- If an exact_price search comes back with exactPriceFallback: true in the result, that means nothing matched that exact figure so the tool automatically widened to fallbackRangeMin-fallbackRangeMax (±$50k) and these ARE those wider results — say so plainly, e.g. "Nothing at exactly $504,519, but here's what's within $50k of that" — never present a fallback result as if it matched the exact price. If totalMatches is still 0 even after the fallback, say so honestly and suggest a wider budget or a different community rather than the fallback line above.
 
 RESULT COUNT — after calling search_listings, always tell the visitor how many results came back (totalMatches) before listing anything, and let THEM choose how many to see rather than deciding for them. If totalMatches is more than about 5, say something like: "I've pulled [totalMatches] results based on your search — do you want me to show you everything, or just the top 5 that best match what you're looking for?" and wait for their answer.
 - If they want just the top few, list up to 5 from what you already have (sorted cheapest first, already the default order).
