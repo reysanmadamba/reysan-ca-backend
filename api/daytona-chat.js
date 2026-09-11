@@ -447,11 +447,14 @@ async function callOpenAI(messages) {
     },
     body: JSON.stringify({
       model: 'gpt-5.6-luna',
-      // Bumped from 500 — a reasoning model spends part of this budget on
-      // hidden reasoning tokens before writing anything visible, and a
-      // tool round-trip (deciding to call search_listings, then writing
-      // the actual reply after seeing results) needs more of that budget
-      // than a single plain turn did.
+      // gpt-5.6-luna hard-rejects (400) function tools on this endpoint
+      // unless reasoning is off — OpenAI's own error: "Function tools with
+      // reasoning_effort are not supported for gpt-5.6-luna in
+      // /v1/chat/completions... set reasoning_effort to 'none'." This also
+      // fixes the earlier empty-reply bug: with reasoning on, the model
+      // could spend the whole completion budget on hidden reasoning
+      // tokens before writing anything visible.
+      reasoning_effort: 'none',
       max_completion_tokens: 1200,
       messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
       tools: openaiTools,
