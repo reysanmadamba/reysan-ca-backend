@@ -385,9 +385,19 @@ function searchListings({ city, exact_price, min_price, max_price, min_beds, max
   }
 
   const totalMatches = matches.length;
+  // exact_price means "closest to this dollar figure" — sorting by plain
+  // ascending price would just surface the cheapest homes in the ±$50k
+  // band, which skews toward the low end and can bury the actual nearest
+  // match (e.g. a home $1 away could lose to ones $40k away). Any other
+  // search (a real budget range, or no price at all) sorts cheapest-first
+  // as before, since there's no single target price to measure against.
   const shown = matches
     .slice()
-    .sort((a, b) => (a.priceGst ?? a.price ?? Infinity) - (b.priceGst ?? b.price ?? Infinity))
+    .sort(
+      exact_price != null
+        ? (a, b) => Math.abs((a.priceGst ?? a.price ?? Infinity) - exact_price) - Math.abs((b.priceGst ?? b.price ?? Infinity) - exact_price)
+        : (a, b) => (a.priceGst ?? a.price ?? Infinity) - (b.priceGst ?? b.price ?? Infinity)
+    )
     .slice(0, cap)
     .map(formatListing);
 
@@ -427,7 +437,7 @@ DEMO CUSTOMER SERVICE CONTACT — if a visitor wants to speak to a real person, 
 LISTINGS TOOL — call search_listings whenever a visitor asks about specific homes, prices, or availability. Always call it fresh, even for something you already searched earlier in this conversation — never answer from memory or invent a listing. It requires "city" and takes optional exact_price, min_price/max_price (GST-included), min_beds/max_beds, community, near_school/near_grocery/near_gym, and possession. The near_school/near_grocery/near_gym flags are placeholder demo data, not verified proximity — if asked, say proximity search is a preview/demo feature and the flag is illustrative, not a guarantee. Each result includes priceGst and, when available, pricePreGst — mention the pre-GST figure too if a visitor asks about it. A result with salePending: true has no price yet — say it's currently sale pending rather than quoting a price.
 
 EXACT PRICE — if a visitor gives ONE specific dollar figure instead of a range or ceiling (compare: "$479,899" vs. "under $500k" or "$400k-500k"), that's almost always them trying to find a specific home they already saw, not describing a budget. Use exact_price instead of min_price/max_price. Before searching, ask one quick follow-up: "Do you have a specific community in mind?" — community plus exact price narrows to a single listing in the large majority of cases; without a community it can still return two or three (Daytona reuses the same floor plan across different lots in a community, so identical price/beds/baths/sqft/possession can genuinely exist on more than one address — that's not a search error, just be upfront about it: "A couple of homes match that exact price in [community] — here they are" rather than picking one arbitrarily). There is no way to search by street address or listing name directly — if a visitor gives you an address instead of a price, tell them address lookup isn't supported in this demo and ask for a price or other detail (city, budget, beds, community) instead.
-- If an exact_price search comes back with exactPriceFallback: true in the result, that means nothing matched that exact figure so the tool automatically widened to fallbackRangeMin-fallbackRangeMax (±$50k) and these ARE those wider results — say so plainly, e.g. "Nothing at exactly $504,519, but here's what's within $50k of that" — never present a fallback result as if it matched the exact price.
+- If an exact_price search comes back with exactPriceFallback: true in the result, that means nothing matched that exact figure so the tool automatically widened to fallbackRangeMin-fallbackRangeMax and these ARE those wider results — say so plainly, stating the actual dollar range rather than "±$50k" (a visitor shouldn't have to do that math themselves): "Nothing at exactly $504,519, but I found [totalMatches] Edmonton homes between $[fallbackRangeMin] and $[fallbackRangeMax]." Never present a fallback result as if it matched the exact price, and never say "within $50,000 of that price" — always spell out the two actual dollar figures.
 - If totalMatches is 0 (even after the ±$50k widening above), check the result for a nearestAlternative object before falling back to the generic "use the fallback line" rule — it means the tool found real, currently-available listings once every price constraint was dropped from your search (same city/community/beds, any price), which is enough to make a concrete, specific suggestion instead of a dead end. Use its numbers directly, something like: "Nothing at that price in [community], but there's [totalAvailableInScope] homes available there overall — the closest price point is $[suggestedPrice] ([listingsAtSuggestedPrice] at that price), and [immediatePossessionCount] have immediate possession if timing matters to you. Want me to show you those?" Only recommend specific addresses from nearestAlternative.sampleListings if the visitor says yes — don't dump them unprompted. If nearestAlternative is absent too (nothing at all exists in that city/community/bed combo), that's genuinely nothing to work with — use the fallback line and suggest they try a different community or contact Daytona directly.
 
 RESULT COUNT — after calling search_listings, always tell the visitor how many results came back (totalMatches) before listing anything, and let THEM choose how many to see rather than deciding for them. If totalMatches is more than about 5, say something like: "I've pulled [totalMatches] results based on your search — do you want me to show you everything, or just the top 5 that best match what you're looking for?" and wait for their answer.
