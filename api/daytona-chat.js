@@ -541,6 +541,8 @@ THE FOUR CORE DETAILS — a home search needs four things: city, bedrooms, commu
 - Later, if the visitor adds one of the skipped details ("3 bedrooms", "the Orchards", "under 600k"), don't ask anything, just run a new search that combines it with everything already known, and say it back in one line: "Got it: $500,000 in Edmonton, 3 bedrooms, The Orchards at Ellerslie." Then show the new results.
 - When community is waived ("any community"), leave the community parameter out of the search entirely; never pass the word "any" as a value. A bedroom range like "3 or 4" or "3-4" is min_beds 3 and max_beds 4. If the result includes communityIgnored, that community isn't one Daytona has in that city, so say the search covered all of the city instead.
 - The first batch of results for a search (offset 0) comes back with a resultsIntro string, and usually a narrowingInvite string. They are already written for you and say exactly what was widened and what the visitor skipped, so use them, do not write your own version. Shape of the reply: (1) resultsIntro, word for word, as the opening (you may add the numbered list right after it); (2) the numbered list; (3) if narrowingInvite is present, right after the list as its own short paragraph, narrowingInvite word for word; (4) the single closing question (5 more and/or the shadow check) as the very last paragraph, unchanged, separated from paragraph (3) by a blank line so it stands alone as its own paragraph. Batches after the first (offset above 0) have no resultsIntro or narrowingInvite, so just show the list and the closing question. Never write the "Nothing at exactly..." or "You didn't specify..." sentences yourself, and never repeat them on later batches. Write your reply only after search_listings has returned, never as a promise ("I'll search across all...") on its own. When the search covered several cities, name the city on every listing line, since the list can mix cities.
+- A figure you assumed out loud ("I'm assuming $600,000 is your budget", or a typo like "6oo" you read as 600) IS the visitor's budget from then on, unless they correct it. Never ask for the budget again after assuming it.
+- Once the visitor has shown they want a home (they gave a budget, city, bedroom count, or community, or answered one of your home questions), a reply like "any", "no preference", "whatever", or "don't care" means "search with what you have". If everything is open, still search (all regions, all bedroom counts, all communities, plus the budget if one was assumed) and say what was left open. Never answer with a general help menu ("what would you like help with: building process, communities, warranty...") in the middle of a home search.
 - Once all four are known (or waived that way), your next action is to call search_listings, with no further questions.
 Proximity (school, grocery, gym) and possession timing are optional: use them if the visitor volunteers them, but don't ask for them before a first search. Asking again for something already given makes you feel like a form instead of an assistant, and is the single most noticeable thing a visitor will hold against you.
 
@@ -618,8 +620,25 @@ function extractSessionId(token) {
 // and never calls the tool, so the visitor gets a promise and no listings.
 const UNFULFILLED_SEARCH_PROMISE = /\b(i['’]ll|i will|let me(?! know)|i['’]m going to|i am going to)\b[^.?!\n]{0,80}\b(search|look (?:for|up|through)|pull|find|run|show|check)\b/i;
 
+// True when the visitor's newest message waives a question Dakota just asked
+// about their home search ("any", "no preference", "whatever"...). The search
+// must run then, so the first model call is forced to use search_listings
+// instead of being left free to ask another question or fall back to the help
+// menu.
+const INTAKE_QUESTION = /which city|how many bedrooms|which community|community (?:in mind|you)|bedroom count|what budget|your budget|open to any/i;
+const WAIVER_REPLY = /^\s*(any|anything|anywhere|any of them|either|all|whatever|no preference|no pref|doesn['’]?t matter|don['’]?t care|do not care|not sure|idk|i don['’]?t know|open|skip|no|nope|nah|none|just show me|show me|surprise me)\b[^.?!]{0,40}[.!]?\s*$/i;
+function shouldForceSearch(messages) {
+  const users = messages.filter((m) => m.role === 'user');
+  const assistants = messages.filter((m) => m.role === 'assistant');
+  const lastUser = users[users.length - 1];
+  const lastAssistant = assistants[assistants.length - 1];
+  if (!lastUser || !lastAssistant || messages[messages.length - 1].role !== 'user') return false;
+  const say = (m) => (typeof m.content === 'string' ? m.content : '');
+  return WAIVER_REPLY.test(say(lastUser)) && INTAKE_QUESTION.test(say(lastAssistant));
+}
+
 async function runOpenAiLoop(messages) {
-  let data = await callOpenAI(messages);
+  let data = await callOpenAI(messages, shouldForceSearch(messages));
   let message = data.choices[0].message;
   let toolCalled = false;
   let nudged = false;
@@ -648,7 +667,7 @@ async function runOpenAiLoop(messages) {
   return (message.content || '').trim();
 }
 
-async function callOpenAI(messages) {
+async function callOpenAI(messages, forceSearch = false) {
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -668,7 +687,7 @@ async function callOpenAI(messages) {
       max_completion_tokens: 1200,
       messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
       tools: openaiTools,
-      tool_choice: 'auto'
+      tool_choice: forceSearch ? { type: 'function', function: { name: 'search_listings' } } : 'auto'
     })
   });
 
