@@ -614,16 +614,32 @@ function extractSessionId(token) {
 // two-provider tool-loop pattern the Tim Hortons chat already uses for
 // the same reason: a single visitor question can take more than one
 // round trip when a tool is involved.
+// The model sometimes writes "I'll search Edmonton-wide" as its whole reply
+// and never calls the tool, so the visitor gets a promise and no listings.
+const UNFULFILLED_SEARCH_PROMISE = /\b(i['’]ll|i will|let me(?! know)|i['’]m going to|i am going to)\b[^.?!\n]{0,80}\b(search|look (?:for|up|through)|pull|find|run|show|check)\b/i;
+
 async function runOpenAiLoop(messages) {
   let data = await callOpenAI(messages);
   let message = data.choices[0].message;
+  let toolCalled = false;
+  let nudged = false;
 
-  while (message.tool_calls && message.tool_calls.length > 0) {
-    messages.push(message);
-    for (const call of message.tool_calls) {
-      const input = JSON.parse(call.function.arguments || '{}');
-      const result = runTool(call.function.name, input);
-      messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
+  while (true) {
+    if (message.tool_calls && message.tool_calls.length > 0) {
+      toolCalled = true;
+      messages.push(message);
+      for (const call of message.tool_calls) {
+        const input = JSON.parse(call.function.arguments || '{}');
+        const result = runTool(call.function.name, input);
+        messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
+      }
+    } else if (!toolCalled && !nudged && UNFULFILLED_SEARCH_PROMISE.test(message.content || '')) {
+      // Promised a search without running it: send it back once, unseen by the visitor.
+      nudged = true;
+      messages.push({ role: 'assistant', content: message.content });
+      messages.push({ role: 'system', content: 'You said you would search but did not call search_listings. Call search_listings now with everything the visitor has told you so far, then write ONE reply that opens with the tool\'s resultsIntro and lists the homes. Do not reply with another message that only promises a search.' });
+    } else {
+      break;
     }
     data = await callOpenAI(messages);
     message = data.choices[0].message;
