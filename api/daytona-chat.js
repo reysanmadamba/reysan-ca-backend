@@ -665,6 +665,8 @@ async function runOpenAiLoop(messages) {
   let message = data.choices[0].message;
   let toolCalled = false;
   let nudged = false;
+  let intro = null;
+  let invite = null;
   // Earlier results already in the chat (they contain listing links) make this search a refinement.
   const ctx = { isFollowUp: messages.some((m) => m.role === 'assistant' && typeof m.content === 'string' && /daytonahomes\.ca\/\S*\/homes\//.test(m.content)) };
 
@@ -675,6 +677,11 @@ async function runOpenAiLoop(messages) {
       for (const call of message.tool_calls) {
         const input = JSON.parse(call.function.arguments || '{}');
         const result = runTool(call.function.name, input, ctx);
+        if (call.function.name === 'search_listings') {
+          // Only a first batch carries these; a later batch clears them.
+          intro = result.resultsIntro || null;
+          invite = result.narrowingInvite || null;
+        }
         messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
       }
     } else if (!toolCalled && !nudged && UNFULFILLED_SEARCH_PROMISE.test(message.content || '')) {
@@ -689,7 +696,28 @@ async function runOpenAiLoop(messages) {
     message = data.choices[0].message;
   }
 
-  return (message.content || '').trim();
+  return enforceResultsIntro((message.content || '').trim(), intro, invite);
+}
+
+// The model sometimes shortens or rewrites the opening lines the search wrote
+// (dropping the price the visitor gave, or the reason a range was used). When
+// the first batch of results comes back, put the written opening in place of
+// whatever the model wrote before the list, and make sure the narrowing invite
+// is there too.
+function enforceResultsIntro(text, intro, invite) {
+  if (!intro) return text;
+  const at = text.search(/(?:^|\n)\s*1\.\s/);
+  if (at === -1) return text; // no numbered list (single home): leave it alone
+  const listStart = text.indexOf('1.', at);
+  text = intro + '\n\n' + text.slice(listStart);
+  if (invite && !text.includes(invite)) {
+    const paras = text.split(/\n\n+/);
+    const last = paras[paras.length - 1];
+    if (paras.length > 1 && /^want to see/i.test(last.trim())) paras.splice(paras.length - 1, 0, invite);
+    else paras.push(invite);
+    text = paras.join('\n\n');
+  }
+  return text;
 }
 
 async function callOpenAI(messages, forceSearch = false) {
