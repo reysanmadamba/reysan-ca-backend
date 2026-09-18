@@ -845,7 +845,11 @@ export default async function handler(req, res) {
 
   const cleanMessages = messages
     .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
-    .map(m => ({ role: m.role, content: m.content.slice(0, 2000) }));
+    // Visitor messages stay capped at 2,000 characters. Dakota's own earlier
+    // replies get more room: a list of five homes plus the closing lines runs
+    // past 2,000, and cutting it off hid the last homes and the follow-up
+    // questions from the model on the next turn.
+    .map(m => ({ role: m.role, content: m.content.slice(0, m.role === 'user' ? 2000 : 8000) }));
 
   if (cleanMessages.length === 0) {
     return res.status(400).json({ error: 'No valid messages provided' });
