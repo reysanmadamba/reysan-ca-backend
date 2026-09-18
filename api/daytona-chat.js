@@ -279,6 +279,17 @@ const tools = [
       required: ['city']
     }
   }
+  ,{
+    name: 'get_listing_location',
+    description: 'Look up the map coordinates for ONE listing the visitor has already been shown, so you can build its shadow-check link. Pass the listing\'s "url" exactly as you wrote it in your earlier message. Use this instead of re-running search_listings when handing over shadow-check links.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'The listing page URL, e.g. https://www.daytonahomes.ca/greater-edmonton/homes/chp-010-020' }
+      },
+      required: ['url']
+    }
+  }
 ];
 
 // OpenAI expects tools wrapped in { type: 'function', function: {...} } —
@@ -312,6 +323,22 @@ function filterListings({ city, exact_price, min_price, max_price, min_beds, max
     if (possession && !(l.possession || '').toLowerCase().includes(String(possession).toLowerCase())) return false;
     return true;
   });
+}
+
+// Coordinates for a listing already shown to the visitor, found by its page
+// URL. Independent of any search, so a shadow-check link never depends on
+// re-running a search and getting the same batch back.
+function getListingLocation({ url } = {}) {
+  const id = String(url || '').trim().toLowerCase().replace(/[?#].*$/, '').replace(/\/+$/, '').split('/').pop();
+  const l = id && LISTINGS.find((x) => String(x.url).toLowerCase().split('/').pop() === id);
+  if (!l) return { error: 'No listing with that url. Use the url exactly as shown in your earlier message.' };
+  return { url: l.url, address: l.address, community: l.community, lat: l.lat, lng: l.lng, geocodePrecision: l.geocodePrecision };
+}
+
+function runTool(name, input) {
+  if (name === 'search_listings') return searchListings(input);
+  if (name === 'get_listing_location') return getListingLocation(input);
+  return { error: 'Unknown tool' };
 }
 
 function searchListings({ city, exact_price, min_price, max_price, min_beds, max_beds, community, near_school, near_grocery, near_gym, possession, limit, offset } = {}) {
@@ -507,12 +534,12 @@ Leave one blank line after the listing details, then ask the shadow-check questi
 A reply ends with at most ONE closing question — never both the shadow-check question AND "want to see 5 more?" back to back, that's two asks competing for the visitor's one answer and the second one reliably gets dropped or ignored. If hasMore is also true for the batch you just showed, merge the two into a single line instead of picking one: "Want to see how sunlight and shadows move across any of these — tell me the number, or say 'all'? Or if none of these fit, I can show you 5 more." If hasMore is false, just ask the shadow-check question alone as above.
 
 Resolving the answer:
-- If they name one or more numbers (e.g. "2", "1 and 3", "the second one"), share the shadow-check link for only those specific listings — call search_listings again FIRST with the exact same parameters you used to produce that numbered list (same city/price/beds/community/etc.) so you have fresh lat/lng to work with, then match the number(s) to that position in the results (1st, 2nd, ...) in the same order, which will be the same homes since results are always returned in a consistent order for the same search. The numbers always refer to the MOST RECENT numbered list you showed (each batch is numbered 1-5 again), so if that list was a later batch, repeat the search with the same offset you used for that batch (e.g. offset 5 for the second batch), otherwise position 5 will point at the wrong home. A bare number from 1 to 5 (including "5") sent in reply to that question is ALWAYS a listing number, never a request for 5 more listings and never an offset. Only wording like "more", "next", "show 5 more" means the next batch.
+- If they name one or more numbers (e.g. "2", "1 and 3", "the second one"), share the shadow-check link for only those specific listings. The numbers always refer to the MOST RECENT numbered list you showed (each batch is numbered 1-5 again): find that number in your last list, take the listing "url" you wrote next to it, and call get_listing_location with that url to get its lat/lng. Do NOT re-run search_listings for this. A shadow-check link works for any listing you showed, so never say a listing is unavailable, no longer listed, or missing from a batch, and never refuse a shadow link because "the coordinates aren't available"; if get_listing_location returns an error, just say you couldn't load that home's map point and ask them to pick another number. A bare number from 1 to 5 (including "5") sent in reply to that question is ALWAYS a listing number, never a request for 5 more listings and never an offset. Only wording like "more", "next", "show 5 more" means the next batch.
 - If they say "all" or otherwise agree without naming a number, share shadow-check links for the listings you actually showed them (not the full totalMatches count) — cap at 5 even if more were shown.
 - If they say yes/sure/sounds good with no number, no "all", and no wording about wanting more listings — and the question you just asked was the single-listing form (only one home shown, no merged offer) — that's unambiguous, treat it as that one listing.
 - If they say the same bare yes/sure to the MERGED question instead (the one that also offered "5 more"), that's genuinely ambiguous — it could mean either the shadow view or the next batch, and picking one to guess risks confidently showing them the wrong thing. Ask one quick clarifying line instead: "Yes to the sunlight view, or the next 5 listings?" and wait for that before doing either.
 
-For each listing you share a shadow-check link for, use that listing's "lat" and "lng" fields to build this link:
+For each listing you share a shadow-check link for (one get_listing_location call per listing, using the url from your earlier list; for "all", call it for each of the listings shown), use the "lat" and "lng" it returns to build this link:
 https://reysan.ca/daytona/shadow-check.html?lat=[lat]&lng=[lng]
 Only mention location precision when you actually hand over a shadow-check link, never while just listing homes. If that listing's "geocodePrecision" is "street", say the view is centered on that street rather than the exact lot (neighbouring homes on the same street can share the same point). If it is "community" or "city", say it is centered on the general neighborhood. Only "address" means the exact lot, and it is rare.
 Do not fabricate shadow, sunlight, or coordinate claims yourself — only use the lat/lng values actually present in a search_listings result, and never guess or invent coordinates for a listing that's missing them.
@@ -566,7 +593,7 @@ async function runOpenAiLoop(messages) {
     messages.push(message);
     for (const call of message.tool_calls) {
       const input = JSON.parse(call.function.arguments || '{}');
-      const result = call.function.name === 'search_listings' ? searchListings(input) : { error: 'Unknown tool' };
+      const result = runTool(call.function.name, input);
       messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
     }
     data = await callOpenAI(messages);
@@ -616,7 +643,7 @@ async function runClaudeLoop(messages) {
     const toolUseBlocks = response.content.filter((b) => b.type === 'tool_use');
     const toolResultBlocks = [];
     for (const block of toolUseBlocks) {
-      const result = block.name === 'search_listings' ? searchListings(block.input) : { error: 'Unknown tool' };
+      const result = runTool(block.name, block.input);
       toolResultBlocks.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(result) });
     }
     messages.push({ role: 'assistant', content: response.content });
