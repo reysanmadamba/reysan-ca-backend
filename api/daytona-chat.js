@@ -335,13 +335,13 @@ function getListingLocation({ url } = {}) {
   return { url: l.url, address: l.address, community: l.community, lat: l.lat, lng: l.lng, geocodePrecision: l.geocodePrecision };
 }
 
-function runTool(name, input) {
-  if (name === 'search_listings') return searchListings(input);
+function runTool(name, input, ctx) {
+  if (name === 'search_listings') return searchListings(input, ctx);
   if (name === 'get_listing_location') return getListingLocation(input);
   return { error: 'Unknown tool' };
 }
 
-function searchListings({ city, exact_price, min_price, max_price, min_beds, max_beds, community, near_school, near_grocery, near_gym, possession, limit, offset } = {}) {
+function searchListings({ city, exact_price, min_price, max_price, min_beds, max_beds, community, near_school, near_grocery, near_gym, possession, limit, offset } = {}, ctx = {}) {
   // No city means the visitor has none in mind: search all three regions.
   if (!city || /^\s*(any|anywhere|all|none|no preference|not sure|open|undecided)\b/i.test(String(city))) city = undefined;
   // Hard-capped at 5 — results are always shown in batches, never as one
@@ -468,6 +468,14 @@ function searchListings({ city, exact_price, min_price, max_price, min_beds, max
     const joinAnd = joinWith('and');
     const joinOr = joinWith('or');
     const intro = [];
+    // A search that follows earlier results in the same chat is a refinement
+    // (a detail was added or changed), so open by restating what it now uses.
+    if (ctx.isFollowUp) {
+      const beds = min_beds != null && max_beds != null ? (min_beds === max_beds ? `${min_beds} bedrooms` : `${min_beds} to ${max_beds} bedrooms`) : min_beds != null ? `${min_beds}+ bedrooms` : max_beds != null ? `up to ${max_beds} bedrooms` : 'any number of bedrooms';
+      const price = exact_price != null ? `a ${money(exact_price)} target` : min_price != null && max_price != null ? `${money(min_price)} to ${money(max_price)}` : max_price != null ? `under ${money(max_price)}` : min_price != null ? `over ${money(min_price)}` : 'any price';
+      const extras = [near_school && 'near a school', near_grocery && 'near a grocery store', near_gym && 'near a gym', possession && `${possession} possession`].filter(Boolean);
+      intro.push(`Updated search: ${[beds, price, city || 'all regions', community || 'all communities', ...extras].join(', ')}.`);
+    }
     if (exactPriceFallback) {
       intro.push(`Nothing at exactly ${money(exact_price)}, so I widened the search $${EXACT_PRICE_FALLBACK_RANGE.toLocaleString('en-CA')} below and above the price you gave me (${money(exact_price - EXACT_PRICE_FALLBACK_RANGE)} to ${money(exact_price + EXACT_PRICE_FALLBACK_RANGE)}).`);
     }
@@ -642,6 +650,8 @@ async function runOpenAiLoop(messages) {
   let message = data.choices[0].message;
   let toolCalled = false;
   let nudged = false;
+  // Earlier results already in the chat (they contain listing links) make this search a refinement.
+  const ctx = { isFollowUp: messages.some((m) => m.role === 'assistant' && typeof m.content === 'string' && /daytonahomes\.ca\/\S*\/homes\//.test(m.content)) };
 
   while (true) {
     if (message.tool_calls && message.tool_calls.length > 0) {
@@ -649,7 +659,7 @@ async function runOpenAiLoop(messages) {
       messages.push(message);
       for (const call of message.tool_calls) {
         const input = JSON.parse(call.function.arguments || '{}');
-        const result = runTool(call.function.name, input);
+        const result = runTool(call.function.name, input, ctx);
         messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
       }
     } else if (!toolCalled && !nudged && UNFULFILLED_SEARCH_PROMISE.test(message.content || '')) {
