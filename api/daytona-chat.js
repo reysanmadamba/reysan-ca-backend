@@ -320,6 +320,20 @@ function searchListings({ city, exact_price, min_price, max_price, min_beds, max
   // big dump, regardless of what the model asks for.
   const cap = Math.min(Math.max(limit || 5, 1), 5);
   const skip = Math.max(offset || 0, 0);
+  // "any community" / "no preference" mean no filter. The model sometimes
+  // passes those words straight through as community/possession, and since
+  // both are substring filters that silently matches nothing (and the
+  // nearest-alternative fallback below reuses them, so it dead-ends too).
+  const isNoPreference = (v) => v == null || /^\s*(any|anywhere|all|none|n\/a|no preference|open|either|whatever|not sure)\b/i.test(String(v)) || !String(v).trim();
+  if (isNoPreference(community)) community = undefined;
+  if (isNoPreference(possession)) possession = undefined;
+  // A community name that doesn't exist in this city is treated the same
+  // way instead of returning nothing, and reported so it can be mentioned.
+  let communityIgnored = null;
+  if (community && !LISTINGS.some((l) => l.city.toLowerCase() === String(city).toLowerCase() && l.community.toLowerCase().includes(String(community).toLowerCase()))) {
+    communityIgnored = community;
+    community = undefined;
+  }
   const args = { city, exact_price, min_price, max_price, min_beds, max_beds, community, near_school, near_grocery, near_gym, possession };
 
   let matches = filterListings(args);
@@ -410,6 +424,7 @@ function searchListings({ city, exact_price, min_price, max_price, min_beds, max
   const salePendingNotCounted = filterListings({ city, community, min_beds, max_beds, near_school, near_grocery, near_gym, possession }, true).filter((l) => (l.priceGst ?? l.price) == null).length;
   if (salePendingNotCounted > 0) result.salePendingNotCounted = salePendingNotCounted;
   if (nearestAlternative) result.nearestAlternative = nearestAlternative;
+  if (communityIgnored) result.communityIgnored = communityIgnored;
   if (exactPriceFallback) {
     result.exactPriceFallback = true;
     result.fallbackRangeMin = exact_price - EXACT_PRICE_FALLBACK_RANGE;
@@ -460,6 +475,7 @@ KNOWN INFO FIRST — before you ask ANY intake question below, read the ENTIRE c
 THE FOUR CORE DETAILS — a home search needs four things: city, bedrooms, community, and budget. Every time a visitor shows home-shopping intent, scan the whole conversation and work out which of the four are still missing, INCLUDING ones they skipped even though you never asked. If any are missing, do NOT search yet: reply with one short, natural sentence that repeats back what you already know and asks only for what's missing, for example "So a 3 bedroom in Edmonton with a $450,000 budget. Which community in Edmonton are you eyeing, or are you open to any of them?" or "Got it, 3 bedrooms in Edmonton. What's your budget, and is there a community you have in mind?" If several are missing, ask them together in that one sentence, not one per message, and never as a numbered form.
 - Only ask about the missing ones. A city, bedroom count, community, or budget already given (in this message or any earlier one) is never asked again.
 - Ask for a missing detail once. If they answer "any", "not sure", "no preference", or ignore the question and ask for something else, treat it as answered (community becomes "any community in that city", a skipped budget becomes no price filter) and search with what you have. If they say "just show me", "whatever you have", or something similar, search immediately.
+- When community is waived ("any community"), leave the community parameter out of the search entirely; never pass the word "any" as a value. A bedroom range like "3 or 4" or "3-4" is min_beds 3 and max_beds 4. If the result includes communityIgnored, that community isn't one Daytona has in that city, so say the search covered all of the city instead.
 - Once all four are known (or waived that way), your next action is to call search_listings, with no further questions.
 Proximity (school, grocery, gym) and possession timing are optional: use them if the visitor volunteers them, but don't ask for them before a first search. Asking again for something already given makes you feel like a form instead of an assistant, and is the single most noticeable thing a visitor will hold against you.
 
