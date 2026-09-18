@@ -660,6 +660,23 @@ function shouldForceSearch(messages) {
   return WAIVER_REPLY.test(say(lastUser)) && INTAKE_QUESTION.test(say(lastAssistant));
 }
 
+// The last reply showed a numbered list AND asked for their bedroom count, so a
+// bare "3" could be listing #3 or 3 bedrooms. The model guesses instead of
+// asking, so this asks directly (and skips the model call).
+function ambiguousNumberReply(messages) {
+  const last = messages[messages.length - 1];
+  let prev = null;
+  for (let i = messages.length - 2; i >= 0; i--) if (messages[i].role === 'assistant') { prev = messages[i]; break; }
+  if (!last || last.role !== 'user' || !prev || typeof last.content !== 'string' || typeof prev.content !== 'string') return null;
+  const m = last.content.trim().match(/^([1-9])\s*[.!]?$/); // "#3" or "listing 3" already settle it, so only a bare digit is ambiguous
+  if (!m) return null;
+  const n = m[1];
+  const askedBedrooms = /if you tell me[^.]*bedroom count/i.test(prev.content);
+  const isListingNumber = new RegExp('(?:^|\\n)\\s*' + n + '\\.\\s').test(prev.content);
+  if (!askedBedrooms || !isListingNumber) return null;
+  return `Do you mean listing #${n} from the list above, or ${n} bedrooms?`;
+}
+
 async function runOpenAiLoop(messages) {
   let data = await callOpenAI(messages, shouldForceSearch(messages));
   let message = data.choices[0].message;
@@ -837,7 +854,10 @@ export default async function handler(req, res) {
   try {
     var reply;
 
-    if (AI_PROVIDER === 'openai') {
+    const clarify = ambiguousNumberReply(cleanMessages);
+    if (clarify) {
+      reply = clarify;
+    } else if (AI_PROVIDER === 'openai') {
       reply = await runOpenAiLoop(cleanMessages.slice());
     } else {
       reply = await runClaudeLoop(cleanMessages.slice());
